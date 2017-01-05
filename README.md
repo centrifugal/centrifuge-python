@@ -1,4 +1,6 @@
-# Centrifuge websocket client for Python
+# Centrifuge-python (work in progress)
+
+This is a websocket client for [Centrifugo](https://github.com/centrifugal/centrifugo) server on top of Python asyncio library.
 
 Usage example:
 
@@ -7,16 +9,7 @@ import time
 import json
 import asyncio
 from cent import generate_token
-from centrifuge import Client, Credentials, SubscriptionError
-
-
-# Configure centrifuge logger
-import logging
-logger = logging.getLogger('centrifuge')
-logger.setLevel(logging.DEBUG)
-handler = logging.StreamHandler()
-handler.setLevel(logging.DEBUG)
-logger.addHandler(handler)
+from centrifuge import Client, Credentials
 
 
 def run(loop):
@@ -29,33 +22,30 @@ def run(loop):
     info = json.dumps({"first_name": "Python", "last_name": "Client"})
     token = generate_token("secret", user, timestamp, info=info)
 
+    address = "ws://localhost:8000/connection/websocket"
     credentials = Credentials(user, timestamp, info, token)
-    client = Client(loop)
+    client = Client(address, credentials)
 
-    yield from client.connect("ws://localhost:8000/connection/websocket", credentials)
-
-    @asyncio.coroutine
-    def message_handler(msg):
-        print("Message:", msg)
+    yield from client.connect()
 
     @asyncio.coroutine
-    def join_handler(msg):
-        print("Join:", msg)
+    def message_handler(**kwargs):
+        print("Message:", kwargs)
 
     @asyncio.coroutine
-    def leave_handler(msg):
-        print("Leave:", msg)
+    def join_handler(**kwargs):
+        print("Join:", kwargs)
 
-    try:
-        sid = yield from client.subscribe(
-            "public:chat",
-            message_handler, join=join_handler, leave=leave_handler
-        )
-    except SubscriptionError:
-        print(str(SubscriptionError))
-        return
-    else:
-        print(sid)
+    @asyncio.coroutine
+    def leave_handler(**kwargs):
+        print("Leave:", kwargs)
+
+    yield from client.subscribe(
+        "public:chat",
+        on_message=message_handler,
+        on_join=join_handler,
+        on_leave=leave_handler
+    )
 
 
 if __name__ == '__main__':

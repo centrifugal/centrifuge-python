@@ -3,7 +3,6 @@ import json
 import asyncio
 import logging
 from random import randint
-from datetime import datetime
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -13,10 +12,9 @@ logger = logging.getLogger('centrifuge')
 
 
 class CentrifugeException(Exception):
-    pass
-
-
-class SubscriptionError(CentrifugeException):
+    """
+    CentrifugeException is a base exception for all other exceptions in this library.
+    """
     pass
 
 
@@ -33,28 +31,61 @@ class Credentials:
         self.token = str(token)
 
 
+class Subscription:
+    """
+    Subscription describes client subscription to Centrifugo channel.
+    """
+    def __init__(self, client, channel, **kwargs):
+        self.client = client
+        self.channel = channel
+        self.handlers = {
+            'message': kwargs.get('on_message'),
+            'subscribe': kwargs.get('on_subscribe'),
+            'unsubscribe': kwargs.get('on_unsubscribe'),
+            'join': kwargs.get('on_join'),
+            'leave': kwargs.get('on_leave'),
+            'error': kwargs.get('on_error')
+        }
+
+    @asyncio.coroutine
+    def unsubscribe(self):
+        yield from self.client._unsubscribe(self)
+
+    @asyncio.coroutine
+    def subscribe(self):
+        yield from self.client._resubscribe(self)
+
+
+STATUS_CONNECTED = 'connected'
+STATUS_CONNECTING = 'connecting'
+STATUS_DISCONNECTED = 'disconnected'
+
+
 class Client:
+    """
+    Client is a Centrifugo server websocket client.
+    """
     factor = 2
     base_delay = 1
     max_delay = 60
     jitter = 0.5
 
-    def __init__(self, loop, reconnect=True):
-        self._loop = loop
-
-        self.address = None
-        self.options = {}
-
-        self.conn = None
-        self.client_id = None
-
-        self.credentials = None
-
-        self.subs = dict()
-        self.messages = asyncio.Queue()
-        self.delay = 1
-
+    def __init__(self, address, credentials, loop=None, reconnect=True, **kwargs):
+        self.address = address
+        self.credentials = credentials
+        self._loop = loop or asyncio.get_event_loop()
         self._reconnect = reconnect
+        self._conn = None
+        self._client_id = None
+        self._subs = {}
+        self._messages = asyncio.Queue()
+        self._delay = 1
+        self._handlers = {
+            "connect": kwargs.get("on_connect"),
+            "disconnect": kwargs.get("on_disconnect"),
+            "error": kwargs.get("on_error")
+        }
+        self._status = STATUS_DISCONNECTED
 
     @asyncio.coroutine
     def close(self):
@@ -63,7 +94,7 @@ class Client:
     @asyncio.coroutine
     def _close(self):
         try:
-            yield from self.conn.close()
+            yield from self._conn.close()
         except ConnectionClosed:
             pass
 
@@ -79,13 +110,17 @@ class Client:
 
         logger.debug("centrifuge: start reconnecting")
 
-        if self.conn and self.conn.open:
+        if self._conn and self._conn.open:
             return
 
-        self.delay = self._exponential_backoff(self.delay)
-        yield from asyncio.sleep(self.delay)
-        yield from self._create_connection()
-        yield from self._subscribe(self.subs.keys())
+        self._delay = self._exponential_backoff(self._delay)
+        yield from asyncio.sleep(self._delay)
+        success = yield from self._create_connection()
+        if success:
+            success = yield from self._subscribe(self._subs.keys())
+
+        if not success:
+            asyncio.ensure_future(self.reconnect())
 
     @staticmethod
     def _get_message(method, params):
@@ -97,28 +132,12 @@ class Client:
         return message
 
     @asyncio.coroutine
-    def _process_connect(self, response):
-        body = response.get("body")
-        self.client_id = body.get("client")
-        if body.get("error"):
-            self.close()
-
-    @asyncio.coroutine
-    def _process_subscribe(self, response):
-        error = response.get("error")
-        if error:
-            channel = response.get("body", {}).get("channel")
-            if channel:
-                self.subs.pop(channel)
-
-    @asyncio.coroutine
     def _create_connection(self):
         try:
-            self.conn = yield from websockets.connect(self.address)
+            self._conn = yield from websockets.connect(self.address)
         except OSError:
-            asyncio.ensure_future(self.reconnect())
-            return
-        self.delay = self.base_delay
+            return False
+        self._delay = self.base_delay
         params = {
             'user': self.credentials.user,
             'timestamp': self.credentials.timestamp,
@@ -127,37 +146,39 @@ class Client:
         }
         message = self._get_message('connect', params)
         try:
-            yield from self.conn.send(json.dumps(message))
+            yield from self._conn.send(json.dumps(message))
         except ConnectionClosed:
-            asyncio.ensure_future(self.reconnect())
-            return
+            return False
         asyncio.ensure_future(self._listen())
         asyncio.ensure_future(self._process_messages())
+        return True
 
     @asyncio.coroutine
-    def connect(self, address, credentials, **options):
-        self.address = address
-        self.credentials = credentials
-        self.options = options
-        yield from self._create_connection()
+    def connect(self):
+        self._status = STATUS_CONNECTING
+        success = yield from self._create_connection()
+        if not success:
+            asyncio.ensure_future(self.reconnect())
+        else:
+            handler = self._handlers.get("connect")
+            if handler:
+                yield from handler()
 
     @asyncio.coroutine
     def disconnect(self):
         yield from self.close()
 
     @asyncio.coroutine
-    def subscribe(self, channel, msg_handler, join=None, leave=None):
-        self.subs.update({channel: {
-            'message': msg_handler,
-            'join': join,
-            'leave': leave
-        }})
-        yield from self._subscribe([channel])
+    def subscribe(self, channel, **kwargs):
+        sub = Subscription(self, channel, **kwargs)
+        self._subs[channel] = sub
+        asyncio.ensure_future(self._subscribe([channel]))
+        return sub
 
     @asyncio.coroutine
     def _subscribe(self, channels):
         if not channels:
-            return
+            return True
 
         messages = []
 
@@ -165,47 +186,110 @@ class Client:
             message = self._get_message("subscribe", {'channel': channel})
             messages.append(message)
 
-        while not self.conn:
-            # TODO: make this through future
-            yield from asyncio.sleep(1)
+        if not self._conn:
+            return False
+
         try:
-            yield from self.conn.send(json.dumps(messages))
+            yield from self._conn.send(json.dumps(messages))
+        except ConnectionClosed:
+            return False
+
+        return True
+
+    @asyncio.coroutine
+    def _resubscribe(self, sub):
+        self._subs[sub.channel] = sub
+        asyncio.ensure_future(self._subscribe([sub.channel]))
+        return sub
+
+    @asyncio.coroutine
+    def _unsubscribe(self, sub):
+
+        if sub.channel in self._subs:
+            del self._subs[sub.channel]
+
+        message = self._get_message("unsubscribe", {'channel': sub.channel})
+
+        try:
+            yield from self._conn.send(json.dumps(message))
         except ConnectionClosed:
             pass
 
     @asyncio.coroutine
-    def _process_disconnect(self, response):
-        logger.debug("centrifuge: disconnect received")
-        body = response.get("body")
-        reconnect = body.get("reconnect")
+    def _disconnect(self, reason, reconnect):
         if not reconnect:
             self._reconnect = False
+        if self._status == STATUS_DISCONNECTED:
+            return
+        self._status = STATUS_DISCONNECTED
         yield from self.close()
+        handler = self._handlers.get("disconnect")
+        if handler:
+            yield from handler(**{"reason": reason, "reconnect": reconnect})
+        asyncio.ensure_future(self.reconnect())
+
+    @asyncio.coroutine
+    def _process_connect(self, response):
+        body = response.get("body")
+        self._client_id = body.get("client")
+        if body.get("error"):
+            yield from self.close()
+            handler = self._handlers.get("error")
+            if handler:
+                yield from handler()
+        else:
+            self._status = STATUS_CONNECTED
+
+    @asyncio.coroutine
+    def _process_subscribe(self, response):
+        error = response.get("error")
+        if not error:
+            return
+
+        channel = response.get("body", {}).get("channel")
+        sub = self._subs.get(channel)
+        if not sub:
+            return
+
+        handler = sub.handlers.get("error")
+        if handler:
+            kw = {"channel": channel, "error": error, "advice": response.get("advice", "")}
+            yield from handler(**kw)
+
+    @asyncio.coroutine
+    def _process_disconnect(self, response):
+        logger.debug("centrifuge: disconnect received")
+        body = response.get("body", {})
+        reconnect = body.get("reconnect")
+        reason = body.get("reason", "")
+        yield from self._disconnect(reason, reconnect)
 
     @asyncio.coroutine
     def _process_message(self, response):
         body = response.get("body")
-        handlers = self.subs.get(body.get("channel"))
-        if handlers:
-            yield from handlers["message"](body)
+        sub = self._subs.get(body.get("channel"))
+        if sub:
+            handler = sub.handlers.get("message")
+            if handler:
+                yield from handler(**body)
 
     @asyncio.coroutine
     def _process_join(self, response):
         body = response.get("body")
-        handlers = self.subs.get(body.get("channel"))
-        if handlers:
-            handler = handlers.get("join")
+        sub = self._subs.get(body.get("channel"))
+        if sub:
+            handler = sub.handlers.get("join")
             if handler:
-                yield from handler(body)
+                yield from handler(**body)
 
     @asyncio.coroutine
     def _process_leave(self, response):
         body = response.get("body")
-        handlers = self.subs.get(body.get("channel"))
-        if handlers:
-            handler = handlers.get("leave")
+        sub = self._subs.get(body.get("channel"))
+        if sub:
+            handler = sub.handlers.get("leave")
             if handler:
-                yield from handler(body)
+                yield from handler(**body)
 
     @asyncio.coroutine
     def _process_response(self, response):
@@ -243,21 +327,33 @@ class Client:
     def _process_messages(self):
         logger.debug("centrifuge: start message processing routine")
         while True:
-            if self.messages:
-                message = yield from self.messages.get()
+            if self._messages:
+                message = yield from self._messages.get()
                 yield from self._parse_response(message)
 
     @asyncio.coroutine
     def _listen(self):
         logger.debug("centrifuge: start message listening routine")
-        while self.conn.open:
+        while self._conn.open:
             try:
-                result = yield from self.conn.recv()
+                result = yield from self._conn.recv()
                 if result:
-                    logger.debug("centrifuge: data received {}, {}".format(datetime.now(), result))
-                    yield from self.messages.put(result)
+                    logger.debug("centrifuge: data received, {}".format(result))
+                    yield from self._messages.put(result)
             except ConnectionClosed:
                 break
 
         logger.debug("centrifuge: stop listening")
-        asyncio.ensure_future(self.reconnect())
+
+        reason = ""
+        reconnect = True
+        if self._conn.close_reason:
+            try:
+                data = json.loads(self._conn.close_reason)
+            except ValueError:
+                pass
+            else:
+                reconnect = data.get("reconnect", True)
+                reason = data.get("reason", "")
+
+        yield from self._disconnect(reason, reconnect)

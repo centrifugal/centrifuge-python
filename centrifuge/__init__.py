@@ -1,1 +1,1 @@
-from .client import Credentials, Client, SubscriptionError
+from .client import Credentials, Client

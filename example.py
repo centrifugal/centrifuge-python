@@ -1,7 +1,7 @@
 import time
 import json
 import asyncio
-from centrifuge import Client, Credentials, SubscriptionError
+from centrifuge import Client, Credentials
 from cent import generate_token
 
 # Configure centrifuge logger
@@ -13,7 +13,7 @@ handler.setLevel(logging.DEBUG)
 logger.addHandler(handler)
 
 
-def run(loop):
+def run():
 
     # Generate credentials.
     # In production this must only be done on backend side and you should
@@ -24,37 +24,57 @@ def run(loop):
     token = generate_token("secret", user, timestamp, info=info)
 
     credentials = Credentials(user, timestamp, info, token)
-    client = Client(loop)
-
-    yield from client.connect("ws://localhost:8000/connection/websocket", credentials)
+    address = "ws://localhost:8000/connection/websocket"
 
     @asyncio.coroutine
-    def message_handler(msg):
-        print("Message:", msg)
+    def connect_handler(**kwargs):
+        print("Connected", kwargs)
 
     @asyncio.coroutine
-    def join_handler(msg):
-        print("Join:", msg)
+    def disconnect_handler(**kwargs):
+        print("Disconnected:", kwargs)
 
     @asyncio.coroutine
-    def leave_handler(msg):
-        print("Leave:", msg)
+    def connect_error_handler(**kwargs):
+        print("Error:", kwargs)
 
-    try:
-        sid = yield from client.subscribe(
-            "public:chat",
-            message_handler, join=join_handler, leave=leave_handler
-        )
-    except SubscriptionError:
-        print(str(SubscriptionError))
-        return
-    else:
-        print(sid)
+    client = Client(
+        address, credentials,
+        on_connect=connect_handler,
+        on_disconnect=disconnect_handler,
+        on_error=connect_error_handler
+    )
+
+    yield from client.connect()
+
+    @asyncio.coroutine
+    def message_handler(**kwargs):
+        print("Message:", kwargs)
+
+    @asyncio.coroutine
+    def join_handler(**kwargs):
+        print("Join:", kwargs)
+
+    @asyncio.coroutine
+    def leave_handler(**kwargs):
+        print("Leave:", kwargs)
+
+    @asyncio.coroutine
+    def error_handler(**kwargs):
+        print("Sub error:", kwargs)
+
+    yield from client.subscribe(
+        "public:chat",
+        on_message=message_handler,
+        on_join=join_handler,
+        on_leave=leave_handler,
+        on_error=error_handler
+    )
 
 
 if __name__ == '__main__':
     loop = asyncio.get_event_loop()
-    asyncio.ensure_future(run(loop))
+    asyncio.ensure_future(run())
     try:
         loop.run_forever()
     except KeyboardInterrupt:
