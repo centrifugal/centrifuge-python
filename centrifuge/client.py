@@ -58,10 +58,14 @@ class Client:
 
     @asyncio.coroutine
     def close(self):
-        self._close()
+        yield from self._close()
 
+    @asyncio.coroutine
     def _close(self):
-        self.conn.close()
+        try:
+            yield from self.conn.close()
+        except ConnectionClosed:
+            pass
 
     def _exponential_backoff(self, delay):
         delay = min(delay * self.factor, self.max_delay)
@@ -69,26 +73,28 @@ class Client:
 
     @asyncio.coroutine
     def reconnect(self):
+        if not self._reconnect:
+            logger.debug("centrifuge: won't reconnect")
+            return
+
         logger.debug("centrifuge: start reconnecting")
+
         if self.conn and self.conn.open:
-            self._close()
-        if self._reconnect:
-            self.delay = self._exponential_backoff(self.delay)
-            yield from asyncio.sleep(self.delay)
-            yield from self._create_connection()
-            for channel in self.subs.keys():
-                # TODO: should send this in batch.
-                yield from self._subscribe(channel)
+            return
+
+        self.delay = self._exponential_backoff(self.delay)
+        yield from asyncio.sleep(self.delay)
+        yield from self._create_connection()
+        yield from self._subscribe(self.subs.keys())
 
     @staticmethod
     def _get_message(method, params):
-        connect_id = uuid.uuid4().hex
         message = {
-            'uid': connect_id,
+            'uid': uuid.uuid4().hex,
             'method': method,
             'params': params
         }
-        return connect_id, message
+        return message
 
     @asyncio.coroutine
     def _process_connect(self, response):
@@ -119,8 +125,12 @@ class Client:
             'info': self.credentials.info,
             'token': self.credentials.token
         }
-        uid, message = self._get_message('connect', params)
-        yield from self.conn.send(json.dumps(message))
+        message = self._get_message('connect', params)
+        try:
+            yield from self.conn.send(json.dumps(message))
+        except ConnectionClosed:
+            asyncio.ensure_future(self.reconnect())
+            return
         asyncio.ensure_future(self._listen())
         asyncio.ensure_future(self._process_messages())
 
@@ -132,32 +142,45 @@ class Client:
         yield from self._create_connection()
 
     @asyncio.coroutine
-    def subscribe(self, channel, msg_handler, join_handler=None, leave_handler=None):
-        self.subs.update({channel: {
-            'message': msg_handler,
-            'join': join_handler,
-            'leave': leave_handler
-        }})
-        yield from self._subscribe(channel)
+    def disconnect(self):
+        yield from self.close()
 
     @asyncio.coroutine
-    def _subscribe(self, channel):
-        uid, message = self._get_message("subscribe", {'channel': channel})
+    def subscribe(self, channel, msg_handler, join=None, leave=None):
+        self.subs.update({channel: {
+            'message': msg_handler,
+            'join': join,
+            'leave': leave
+        }})
+        yield from self._subscribe([channel])
+
+    @asyncio.coroutine
+    def _subscribe(self, channels):
+        if not channels:
+            return
+
+        messages = []
+
+        for channel in channels:
+            message = self._get_message("subscribe", {'channel': channel})
+            messages.append(message)
+
         while not self.conn:
             # TODO: make this through future
             yield from asyncio.sleep(1)
         try:
-            yield from self.conn.send(json.dumps(message))
+            yield from self.conn.send(json.dumps(messages))
         except ConnectionClosed:
-            self.reconnect()
+            pass
 
     @asyncio.coroutine
     def _process_disconnect(self, response):
+        logger.debug("centrifuge: disconnect received")
         body = response.get("body")
         reconnect = body.get("reconnect")
         if not reconnect:
             self._reconnect = False
-        yield from self.conn.close()
+        yield from self.close()
 
     @asyncio.coroutine
     def _process_message(self, response):
@@ -213,11 +236,12 @@ class Client:
             if isinstance(response, list):
                 for obj_response in response:
                     yield from self._process_response(obj_response)
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as err:
+            logger.error("centrifuge: %s", err)
 
     @asyncio.coroutine
     def _process_messages(self):
+        logger.debug("centrifuge: start message processing routine")
         while True:
             if self.messages:
                 message = yield from self.messages.get()
@@ -225,6 +249,7 @@ class Client:
 
     @asyncio.coroutine
     def _listen(self):
+        logger.debug("centrifuge: start message listening routine")
         while self.conn.open:
             try:
                 result = yield from self.conn.recv()
@@ -232,6 +257,7 @@ class Client:
                     logger.debug("centrifuge: data received {}, {}".format(datetime.now(), result))
                     yield from self.messages.put(result)
             except ConnectionClosed:
-                pass
+                break
+
         logger.debug("centrifuge: stop listening")
         asyncio.ensure_future(self.reconnect())
