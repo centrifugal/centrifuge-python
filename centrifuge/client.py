@@ -38,6 +38,7 @@ class Subscription:
     def __init__(self, client, channel, **kwargs):
         self.client = client
         self.channel = channel
+        self.last_message_id = None
         self.handlers = {
             'message': kwargs.get('on_message'),
             'subscribe': kwargs.get('on_subscribe'),
@@ -104,14 +105,19 @@ class Client:
 
     @asyncio.coroutine
     def reconnect(self):
+        if self._status == STATUS_CONNECTED:
+            return
+
+        if self._conn and self._conn.open:
+            return
+
         if not self._reconnect:
             logger.debug("centrifuge: won't reconnect")
             return
 
         logger.debug("centrifuge: start reconnecting")
 
-        if self._conn and self._conn.open:
-            return
+        self._status = STATUS_CONNECTING
 
         self._delay = self._exponential_backoff(self._delay)
         yield from asyncio.sleep(self._delay)
@@ -183,7 +189,13 @@ class Client:
         messages = []
 
         for channel in channels:
-            message = self._get_message("subscribe", {'channel': channel})
+            params = {'channel': channel}
+            if channel in self._subs:
+                params.update({
+                    "recover": True,
+                    "last": self._subs[channel].last_message_id
+                })
+            message = self._get_message("subscribe", params)
             messages.append(message)
 
         if not self._conn:
@@ -242,19 +254,57 @@ class Client:
 
     @asyncio.coroutine
     def _process_subscribe(self, response):
-        error = response.get("error")
-        if not error:
-            return
+        body = response.get("body", {})
+        channel = body.get("channel")
 
-        channel = response.get("body", {}).get("channel")
         sub = self._subs.get(channel)
         if not sub:
             return
 
-        handler = sub.handlers.get("error")
+        error = response.get("error")
+        if not error:
+            msg_handler = sub.handlers.get("message")
+            messages = body.get("messages", [])
+            if msg_handler and messages:
+                for message in messages:
+                    sub.last_message_id = message.get("uid")
+                    yield from msg_handler(**message)
+        else:
+            error_handler = sub.handlers.get("error")
+            if error_handler:
+                kw = {"channel": channel, "error": error, "advice": response.get("advice", "")}
+                yield from error_handler(**kw)
+
+    @asyncio.coroutine
+    def _process_message(self, response):
+        body = response.get("body")
+        sub = self._subs.get(body.get("channel"))
+        if not sub:
+            return
+        handler = sub.handlers.get("message")
         if handler:
-            kw = {"channel": channel, "error": error, "advice": response.get("advice", "")}
-            yield from handler(**kw)
+            sub.last_message_id = body.get("uid")
+            yield from handler(**body)
+
+    @asyncio.coroutine
+    def _process_join(self, response):
+        body = response.get("body")
+        sub = self._subs.get(body.get("channel"))
+        if not sub:
+            return
+        handler = sub.handlers.get("join")
+        if handler:
+            yield from handler(**body)
+
+    @asyncio.coroutine
+    def _process_leave(self, response):
+        body = response.get("body")
+        sub = self._subs.get(body.get("channel"))
+        if not sub:
+            return
+        handler = sub.handlers.get("leave")
+        if handler:
+            yield from handler(**body)
 
     @asyncio.coroutine
     def _process_disconnect(self, response):
@@ -263,33 +313,6 @@ class Client:
         reconnect = body.get("reconnect")
         reason = body.get("reason", "")
         yield from self._disconnect(reason, reconnect)
-
-    @asyncio.coroutine
-    def _process_message(self, response):
-        body = response.get("body")
-        sub = self._subs.get(body.get("channel"))
-        if sub:
-            handler = sub.handlers.get("message")
-            if handler:
-                yield from handler(**body)
-
-    @asyncio.coroutine
-    def _process_join(self, response):
-        body = response.get("body")
-        sub = self._subs.get(body.get("channel"))
-        if sub:
-            handler = sub.handlers.get("join")
-            if handler:
-                yield from handler(**body)
-
-    @asyncio.coroutine
-    def _process_leave(self, response):
-        body = response.get("body")
-        sub = self._subs.get(body.get("channel"))
-        if sub:
-            handler = sub.handlers.get("leave")
-            if handler:
-                yield from handler(**body)
 
     @asyncio.coroutine
     def _process_response(self, response):
