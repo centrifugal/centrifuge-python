@@ -1,11 +1,10 @@
 import uuid
 import json
+import random
 import asyncio
 import logging
-from random import randint
 
 import websockets
-from websockets.exceptions import ConnectionClosed
 
 
 logger = logging.getLogger('centrifuge')
@@ -13,7 +12,36 @@ logger = logging.getLogger('centrifuge')
 
 class CentrifugeException(Exception):
     """
-    CentrifugeException is a base exception for all other exceptions in this library.
+    CentrifugeException is a base exception for all other exceptions
+    in this library.
+    """
+    pass
+
+
+class ConnectionClosed(CentrifugeException):
+    """
+    ConnectionClosed raised when underlying websocket connection closed.
+    """
+    pass
+
+
+class Timeout(CentrifugeException):
+    """
+    Timeout raised every time operation times out.
+    """
+    pass
+
+
+class SubscriptionError(CentrifugeException):
+    """
+    SubscriptionError raised when an error subscribing on channel occurred.
+    """
+    pass
+
+
+class CallError(CentrifugeException):
+    """
+    Call raised when an error returned from server as result of presence/history/publish call.
     """
     pass
 
@@ -36,6 +64,8 @@ class Subscription:
     Subscription describes client subscription to Centrifugo channel.
     """
     def __init__(self, client, channel, **kwargs):
+        self._future = asyncio.Future()
+        self._subscribed = False
         self.client = client
         self.channel = channel
         self.last_message_id = None
@@ -56,6 +86,21 @@ class Subscription:
     def subscribe(self):
         yield from self.client._resubscribe(self)
 
+    @asyncio.coroutine
+    def history(self, timeout=None):
+        res = yield from self.client._history(self, timeout=timeout)
+        return res
+
+    @asyncio.coroutine
+    def presence(self, timeout=None):
+        res = yield from self.client._presence(self, timeout=timeout)
+        return res
+
+    @asyncio.coroutine
+    def publish(self, data):
+        success = yield from self.client._publish(self, data)
+        return success
+
 
 STATUS_CONNECTED = 'connected'
 STATUS_CONNECTING = 'connecting'
@@ -71,22 +116,23 @@ class Client:
     max_delay = 60
     jitter = 0.5
 
-    def __init__(self, address, credentials, loop=None, reconnect=True, **kwargs):
+    def __init__(self, address, credentials, **kwargs):
         self.address = address
         self.credentials = credentials
-        self._loop = loop or asyncio.get_event_loop()
-        self._reconnect = reconnect
         self._conn = None
         self._client_id = None
         self._subs = {}
         self._messages = asyncio.Queue()
         self._delay = 1
+        self._status = STATUS_DISCONNECTED
+        self._reconnect = kwargs.get("reconnect", True)
         self._handlers = {
             "connect": kwargs.get("on_connect"),
             "disconnect": kwargs.get("on_disconnect"),
             "error": kwargs.get("on_error")
         }
-        self._status = STATUS_DISCONNECTED
+        self._loop = kwargs.get("loop", asyncio.get_event_loop())
+        self._futures = {}
 
     @asyncio.coroutine
     def close(self):
@@ -96,12 +142,12 @@ class Client:
     def _close(self):
         try:
             yield from self._conn.close()
-        except ConnectionClosed:
+        except websockets.ConnectionClosed:
             pass
 
     def _exponential_backoff(self, delay):
         delay = min(delay * self.factor, self.max_delay)
-        return delay + randint(0, int(delay*self.jitter))
+        return delay + random.randint(0, int(delay*self.jitter))
 
     @asyncio.coroutine
     def reconnect(self):
@@ -129,9 +175,9 @@ class Client:
             asyncio.ensure_future(self.reconnect())
 
     @staticmethod
-    def _get_message(method, params):
+    def _get_message(method, params, uid=None):
         message = {
-            'uid': uuid.uuid4().hex,
+            'uid': uid or uuid.uuid4().hex,
             'method': method,
             'params': params
         }
@@ -153,7 +199,7 @@ class Client:
         message = self._get_message('connect', params)
         try:
             yield from self._conn.send(json.dumps(message))
-        except ConnectionClosed:
+        except websockets.ConnectionClosed:
             return False
         asyncio.ensure_future(self._listen())
         asyncio.ensure_future(self._process_messages())
@@ -203,7 +249,7 @@ class Client:
 
         try:
             yield from self._conn.send(json.dumps(messages))
-        except ConnectionClosed:
+        except websockets.ConnectionClosed:
             return False
 
         return True
@@ -222,10 +268,98 @@ class Client:
 
         message = self._get_message("unsubscribe", {'channel': sub.channel})
 
+        unsubscribe_handler = sub.handlers.get("unsubscribe")
+        if unsubscribe_handler:
+            yield from unsubscribe_handler(**{"channel": sub.channel})
+
         try:
             yield from self._conn.send(json.dumps(message))
-        except ConnectionClosed:
+        except websockets.ConnectionClosed:
             pass
+
+    def _register_future(self, uid, timeout):
+        future = asyncio.Future()
+        self._futures[uid] = future
+
+        if timeout:
+            def cb():
+                if not future.done():
+                    future.set_exception(Timeout)
+                    del self._futures[uid]
+            self._loop.call_later(timeout, cb)
+
+        return future
+
+    def _future_error(self, uid, error):
+        future = self._futures.get(uid)
+        if not future:
+            return
+        future.set_exception(CallError(error))
+        del self._futures[uid]
+
+    def _future_success(self, uid, result):
+        future = self._futures.get(uid)
+        if not future:
+            return
+        future.set_result(result)
+        del self._futures[uid]
+
+    @asyncio.coroutine
+    def _history(self, sub, timeout=None):
+        if sub.channel not in self._subs:
+            raise CallError("subscription not in subscribed state")
+
+        yield from sub._future
+
+        uid = uuid.uuid4().hex
+        message = self._get_message("history", {'channel': sub.channel}, uid=uid)
+
+        try:
+            yield from self._conn.send(json.dumps(message))
+        except websockets.ConnectionClosed:
+            raise ConnectionClosed
+
+        future = self._register_future(uid, timeout or 5)
+        result = yield from future
+        return result
+
+    @asyncio.coroutine
+    def _presence(self, sub, timeout=None):
+        if sub.channel not in self._subs:
+            raise CallError("subscription not in subscribed state")
+
+        yield from sub._future
+
+        uid = uuid.uuid4().hex
+        message = self._get_message("presence", {'channel': sub.channel}, uid=uid)
+
+        try:
+            yield from self._conn.send(json.dumps(message))
+        except websockets.ConnectionClosed:
+            raise ConnectionClosed
+
+        future = self._register_future(uid, timeout or 5)
+        result = yield from future
+        return result
+
+    @asyncio.coroutine
+    def _publish(self, sub, data):
+        if sub.channel not in self._subs:
+            raise CallError("subscription not in subscribed state")
+
+        yield from sub._future
+
+        uid = uuid.uuid4().hex
+        message = self._get_message("publish", {'channel': sub.channel, 'data': data}, uid=uid)
+
+        try:
+            yield from self._conn.send(json.dumps(message))
+        except websockets.ConnectionClosed:
+            raise ConnectionClosed
+
+        future = self._register_future(uid, 0)
+        result = yield from future
+        return result
 
     @asyncio.coroutine
     def _disconnect(self, reason, reconnect):
@@ -263,6 +397,10 @@ class Client:
 
         error = response.get("error")
         if not error:
+            sub._future.set_result(True)
+            subscribe_handler = sub.handlers.get("subscribe")
+            if subscribe_handler:
+                yield from subscribe_handler(**{"channel": channel})
             msg_handler = sub.handlers.get("message")
             messages = body.get("messages", [])
             if msg_handler and messages:
@@ -270,6 +408,7 @@ class Client:
                     sub.last_message_id = message.get("uid")
                     yield from msg_handler(**message)
         else:
+            sub._future.set_exception(SubscriptionError(error))
             error_handler = sub.handlers.get("error")
             if error_handler:
                 kw = {"channel": channel, "error": error, "advice": response.get("advice", "")}
@@ -307,6 +446,42 @@ class Client:
             yield from handler(**body)
 
     @asyncio.coroutine
+    def _process_publish(self, response):
+        uid = response.get("uid")
+        if not uid:
+            return
+
+        error = response.get("error")
+        if error:
+            self._future_error(uid, error)
+        else:
+            self._future_success(uid, response.get("body", {}).get("status", False))
+
+    @asyncio.coroutine
+    def _process_presence(self, response):
+        uid = response.get("uid")
+        if not uid:
+            return
+
+        error = response.get("error")
+        if error:
+            self._future_error(uid, error)
+        else:
+            self._future_success(uid, response.get("body", {}).get("data", {}))
+
+    @asyncio.coroutine
+    def _process_history(self, response):
+        uid = response.get("uid")
+        if not uid:
+            return
+
+        error = response.get("error")
+        if error:
+            self._future_error(uid, error)
+        else:
+            self._future_success(uid, response.get("body", {}).get("data", []))
+
+    @asyncio.coroutine
     def _process_disconnect(self, response):
         logger.debug("centrifuge: disconnect received")
         body = response.get("body", {})
@@ -331,6 +506,12 @@ class Client:
                 cb = self._process_leave
             elif method == 'disconnect':
                 cb = self._process_disconnect
+            elif method == 'publish':
+                cb = self._process_publish
+            elif method == 'presence':
+                cb = self._process_presence
+            elif method == 'history':
+                cb = self._process_history
             if cb:
                 yield from cb(response)
 
@@ -363,7 +544,7 @@ class Client:
                 if result:
                     logger.debug("centrifuge: data received, {}".format(result))
                     yield from self._messages.put(result)
-            except ConnectionClosed:
+            except websockets.ConnectionClosed:
                 break
 
         logger.debug("centrifuge: stop listening")

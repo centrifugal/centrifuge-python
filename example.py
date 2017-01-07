@@ -1,7 +1,7 @@
 import time
 import json
 import asyncio
-from centrifuge import Client, Credentials
+from centrifuge import Client, Credentials, CentrifugeException
 from cent import generate_token
 
 # Configure centrifuge logger
@@ -60,16 +60,47 @@ def run():
         print("Leave:", kwargs)
 
     @asyncio.coroutine
+    def subscribe_handler(**kwargs):
+        print("Sub subscribed:", kwargs)
+
+    @asyncio.coroutine
+    def unsubscribe_handler(**kwargs):
+        print("Sub unsubscribed:", kwargs)
+
+    @asyncio.coroutine
     def error_handler(**kwargs):
         print("Sub error:", kwargs)
 
-    yield from client.subscribe(
+    sub = yield from client.subscribe(
         "public:chat",
         on_message=message_handler,
         on_join=join_handler,
         on_leave=leave_handler,
-        on_error=error_handler
+        on_error=error_handler,
+        on_subscribe=subscribe_handler,
+        on_unsubscribe=unsubscribe_handler
     )
+
+    try:
+        success = yield from sub.publish({})
+    except CentrifugeException as e:
+        print("Publish error:", type(e), e)
+    else:
+        print("Publish successful:", success)
+
+    try:
+        history = yield from sub.history()
+    except CentrifugeException as e:
+        print("Channel history error:", type(e), e)
+    else:
+        print("Channel history:", history)
+
+    try:
+        presence = yield from sub.presence()
+    except CentrifugeException as e:
+        print("Channel presence error:", type(e), e)
+    else:
+        print("Channel presence:", presence)
 
 
 if __name__ == '__main__':
