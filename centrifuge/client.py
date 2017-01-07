@@ -369,6 +369,13 @@ class Client:
             return
         self._status = STATUS_DISCONNECTED
         yield from self.close()
+
+        for ch, sub in self._subs.items():
+            sub._future = asyncio.Future()
+            unsubscribe_handler = sub.handlers.get("unsubscribe")
+            if unsubscribe_handler:
+                yield from unsubscribe_handler(**{"channel": sub.channel})
+
         handler = self._handlers.get("disconnect")
         if handler:
             yield from handler(**{"reason": reason, "reconnect": reconnect})
