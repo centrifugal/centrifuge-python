@@ -119,12 +119,12 @@ class Client:
     def __init__(self, address, credentials, **kwargs):
         self.address = address
         self.credentials = credentials
+        self.status = STATUS_DISCONNECTED
+        self.client_id = None
         self._conn = None
-        self._client_id = None
         self._subs = {}
         self._messages = asyncio.Queue()
         self._delay = 1
-        self._status = STATUS_DISCONNECTED
         self._reconnect = kwargs.get("reconnect", True)
         self._handlers = {
             "connect": kwargs.get("on_connect"),
@@ -151,7 +151,7 @@ class Client:
 
     @asyncio.coroutine
     def reconnect(self):
-        if self._status == STATUS_CONNECTED:
+        if self.status == STATUS_CONNECTED:
             return
 
         if self._conn and self._conn.open:
@@ -163,7 +163,7 @@ class Client:
 
         logger.debug("centrifuge: start reconnecting")
 
-        self._status = STATUS_CONNECTING
+        self.status = STATUS_CONNECTING
 
         self._delay = self._exponential_backoff(self._delay)
         yield from asyncio.sleep(self._delay)
@@ -207,7 +207,7 @@ class Client:
 
     @asyncio.coroutine
     def connect(self):
-        self._status = STATUS_CONNECTING
+        self.status = STATUS_CONNECTING
         success = yield from self._create_connection()
         if not success:
             asyncio.ensure_future(self.reconnect())
@@ -365,9 +365,10 @@ class Client:
     def _disconnect(self, reason, reconnect):
         if not reconnect:
             self._reconnect = False
-        if self._status == STATUS_DISCONNECTED:
+        if self.status == STATUS_DISCONNECTED:
             return
-        self._status = STATUS_DISCONNECTED
+        self.status = STATUS_DISCONNECTED
+        self.client_id = None
         yield from self.close()
 
         for ch, sub in self._subs.items():
@@ -384,14 +385,14 @@ class Client:
     @asyncio.coroutine
     def _process_connect(self, response):
         body = response.get("body")
-        self._client_id = body.get("client")
+        self.client_id = body.get("client")
         if body.get("error"):
             yield from self.close()
             handler = self._handlers.get("error")
             if handler:
                 yield from handler()
         else:
-            self._status = STATUS_CONNECTED
+            self.status = STATUS_CONNECTED
 
     @asyncio.coroutine
     def _process_subscribe(self, response):
@@ -521,6 +522,11 @@ class Client:
                 cb = self._process_history
             if cb:
                 yield from cb(response)
+            else:
+                logger.debug(
+                    "centrifuge: received message with unknown method %s",
+                    method
+                )
 
     @asyncio.coroutine
     def _parse_response(self, message):

@@ -131,3 +131,9 @@ if __name__ == '__main__':
     finally:
         loop.close()
 ```
+
+### TODO
+
+* [connection refresh](https://fzambia.gitbooks.io/centrifugal/content/server/connection_check.html) support
+* functional tests
+* more detailed API description
