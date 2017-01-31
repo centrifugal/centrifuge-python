@@ -126,6 +126,10 @@ class Client:
         self._messages = asyncio.Queue()
         self._delay = 1
         self._reconnect = kwargs.get("reconnect", True)
+        self._ping = kwargs.get("ping", True)
+        self._ping_timeout = kwargs.get("ping_timeout", 25)
+        self._pong_wait_timeout = kwargs.get("pong_wait_timeout", 5)
+        self._ping_timer = None
         self._handlers = {
             "connect": kwargs.get("on_connect"),
             "disconnect": kwargs.get("on_disconnect"),
@@ -208,6 +212,23 @@ class Client:
         asyncio.ensure_future(self._process_messages())
         return True
 
+    def _send_ping(self):
+        if self.status != STATUS_CONNECTED:
+            return
+        uid = uuid.uuid4().hex
+        message = self._get_message("ping", {}, uid=uid)
+
+        try:
+            yield from self._conn.send(json.dumps(message))
+        except websockets.ConnectionClosed:
+            return
+
+        future = self._register_future(uid, self._pong_wait_timeout)
+        try:
+            yield from future
+        except Timeout:
+            yield from self._disconnect("no ping", True)
+
     @asyncio.coroutine
     def connect(self):
         self.status = STATUS_CONNECTING
@@ -216,6 +237,10 @@ class Client:
             asyncio.ensure_future(self.reconnect())
         else:
             handler = self._handlers.get("connect")
+            if self._ping:
+                self._ping_timer = self._loop.call_later(
+                    self._ping_timeout, lambda: asyncio.ensure_future(self._send_ping(), loop=self._loop)
+                )
             if handler:
                 yield from handler()
 
@@ -366,6 +391,9 @@ class Client:
 
     @asyncio.coroutine
     def _disconnect(self, reason, reconnect):
+        if self._ping_timer:
+            self._ping_timer.cancel()
+            self._ping_timer = None
         if not reconnect:
             self._reconnect = False
         if self.status == STATUS_DISCONNECTED:
@@ -493,6 +521,18 @@ class Client:
             self._future_success(uid, response.get("body", {}).get("data", []))
 
     @asyncio.coroutine
+    def _process_ping(self, response):
+        uid = response.get("uid")
+        if not uid:
+            return
+
+        error = response.get("error")
+        if error:
+            self._future_error(uid, error)
+        else:
+            self._future_success(uid, response.get("body", {}).get("data", ""))
+
+    @asyncio.coroutine
     def _process_disconnect(self, response):
         logger.debug("centrifuge: disconnect received")
         body = response.get("body", {})
@@ -502,6 +542,15 @@ class Client:
 
     @asyncio.coroutine
     def _process_response(self, response):
+
+        # Restart ping timer every time we received something from connection.
+        # This allows us to reduce amount of pings sent around in busy apps.
+        if self._ping_timer:
+            self._ping_timer.cancel()
+            self._ping_timer = self._loop.call_later(
+                self._ping_timeout, lambda: asyncio.ensure_future(self._send_ping(), loop=self._loop)
+            )
+
         method = response.get("method")
         if method:
             cb = None
@@ -523,6 +572,8 @@ class Client:
                 cb = self._process_presence
             elif method == 'history':
                 cb = self._process_history
+            elif method == 'ping':
+                cb = self._process_ping
             if cb:
                 yield from cb(response)
             else:
