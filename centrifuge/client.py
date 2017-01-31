@@ -134,6 +134,9 @@ class Client:
         self._loop = kwargs.get("loop", asyncio.get_event_loop())
         self._futures = {}
 
+    def channels(self):
+        return self._subs.keys()
+
     @asyncio.coroutine
     def close(self):
         yield from self._close()
