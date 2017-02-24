@@ -59,6 +59,12 @@ class Credentials:
         self.token = str(token)
 
 
+class PrivateSign:
+    def __init__(self, sign, info=""):
+        self.sign = sign
+        self.info = info
+
+
 class Subscription:
     """
     Subscription describes client subscription to Centrifugo channel.
@@ -115,6 +121,7 @@ class Client:
     base_delay = 1
     max_delay = 60
     jitter = 0.5
+    private_channel_prefix = "$"
 
     def __init__(self, address, credentials, **kwargs):
         self.address = address
@@ -130,10 +137,12 @@ class Client:
         self._ping_timeout = kwargs.get("ping_timeout", 25)
         self._pong_wait_timeout = kwargs.get("pong_wait_timeout", 5)
         self._ping_timer = None
+        self._future = None
         self._handlers = {
             "connect": kwargs.get("on_connect"),
             "disconnect": kwargs.get("on_disconnect"),
-            "error": kwargs.get("on_error")
+            "error": kwargs.get("on_error"),
+            "private_sub": kwargs.get("on_private_sub")
         }
         self._loop = kwargs.get("loop", asyncio.get_event_loop())
         self._futures = {}
@@ -210,6 +219,18 @@ class Client:
             return False
         asyncio.ensure_future(self._listen())
         asyncio.ensure_future(self._process_messages())
+
+        self._future = asyncio.Future()
+        success = yield from self._future
+        if success:
+            if self._ping:
+                self._ping_timer = self._loop.call_later(
+                    self._ping_timeout, lambda: asyncio.ensure_future(self._send_ping(), loop=self._loop)
+                )
+            handler = self._handlers.get("connect")
+            if handler:
+                yield from handler(**{"client_id": self.client_id})
+
         return True
 
     def _send_ping(self):
@@ -235,14 +256,6 @@ class Client:
         success = yield from self._create_connection()
         if not success:
             asyncio.ensure_future(self.reconnect())
-        else:
-            handler = self._handlers.get("connect")
-            if self._ping:
-                self._ping_timer = self._loop.call_later(
-                    self._ping_timeout, lambda: asyncio.ensure_future(self._send_ping(), loop=self._loop)
-                )
-            if handler:
-                yield from handler()
 
     @asyncio.coroutine
     def disconnect(self):
@@ -262,8 +275,26 @@ class Client:
 
         messages = []
 
+        private_channels = []
+        for channel in channels:
+            if channel.startswith(self.private_channel_prefix):
+                private_channels.append(channel)
+
+        private_data = {}
+        handler = self._handlers.get("private_sub")
+        if private_channels and handler:
+            data = yield from handler(**{"client_id": self.client_id, "channels": private_channels})
+            if isinstance(data, dict):
+                private_data = data
+
         for channel in channels:
             params = {'channel': channel}
+            if channel in private_data:
+                params.update({
+                    "client": self.client_id,
+                    "sign": private_data[channel].sign,
+                    "info": private_data[channel].info
+                })
             if channel in self._subs:
                 params.update({
                     "recover": True,
@@ -418,12 +449,16 @@ class Client:
         body = response.get("body")
         self.client_id = body.get("client")
         if body.get("error"):
+            if self._future:
+                self._future.set_result(False)
             yield from self.close()
             handler = self._handlers.get("error")
             if handler:
                 yield from handler()
         else:
             self.status = STATUS_CONNECTED
+            if self._future:
+                self._future.set_result(True)
 
     @asyncio.coroutine
     def _process_subscribe(self, response):

@@ -1,8 +1,8 @@
 import time
 import json
 import asyncio
-from centrifuge import Client, Credentials, CentrifugeException
-from cent import generate_token
+from centrifuge import Client, Credentials, CentrifugeException, PrivateSign
+from cent import generate_token, generate_channel_sign
 
 # Configure centrifuge logger
 import logging
@@ -38,11 +38,27 @@ def run():
     def connect_error_handler(**kwargs):
         print("Error:", kwargs)
 
+    @asyncio.coroutine
+    def private_sub_handler(**kwargs):
+        print("Private channel request:", kwargs)
+        client_id = kwargs.get("client_id")
+        channels = kwargs.get("channels")
+        data = {}
+        for channel in channels:
+            # in production here must be a call to your application backend to get
+            # private channel sign, in example we simply generate sign for every channel
+            # on client side using function from cent library for simplicity. Your real
+            # app clients should never see this secret key!
+            data[channel] = PrivateSign(generate_channel_sign("secret", client_id, channel))
+
+        return data
+
     client = Client(
         address, credentials,
         on_connect=connect_handler,
         on_disconnect=disconnect_handler,
-        on_error=connect_error_handler
+        on_error=connect_error_handler,
+        on_private_sub=private_sub_handler
     )
 
     yield from client.connect()
