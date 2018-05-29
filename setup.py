@@ -3,7 +3,7 @@ from os.path import join, dirname
 
 setup(
     name='centrifuge-python',
-    version='0.1',
+    version='0.2',
     description="Websocket client for Centrifugo on top of asyncio library",
     install_requires=["websockets>=3.2"],
     packages=find_packages(),
