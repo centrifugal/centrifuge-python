@@ -229,7 +229,7 @@ class Client:
                 )
             handler = self._handlers.get("connect")
             if handler:
-                yield from handler(**{"client_id": self.client_id})
+                yield from handler(**{"client": self.client_id})
 
         return True
 
@@ -283,7 +283,7 @@ class Client:
         private_data = {}
         handler = self._handlers.get("private_sub")
         if private_channels and handler:
-            data = yield from handler(**{"client_id": self.client_id, "channels": private_channels})
+            data = yield from handler(**{"client": self.client_id, "channels": private_channels})
             if isinstance(data, dict):
                 private_data = data
 
