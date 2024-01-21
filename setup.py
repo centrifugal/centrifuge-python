@@ -3,9 +3,12 @@ from os.path import join, dirname
 
 setup(
     name='centrifuge-python',
-    version='0.2',
-    description="Websocket client for Centrifugo on top of asyncio library",
-    install_requires=["websockets>=3.2"],
+    version='0.3',
+    description="Websocket real-time SDK for Centrifugo on top of asyncio library",
+    install_requires=[
+        "websockets>=11.0.3,<12.0.0",
+        "protobuf>=4.23.4,<5.0.0",
+    ],
     packages=find_packages(),
     long_description=open(join(dirname(__file__), 'README.md')).read(),
     url='https://github.com/centrifugal/centrifuge-python',

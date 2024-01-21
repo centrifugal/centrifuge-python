@@ -1,8 +1,8 @@
 import time
 import json
 import asyncio
-from centrifuge import Client, Credentials, CentrifugeException, PrivateSign
-from cent import generate_token, generate_channel_sign
+import signal
+from centrifuge import Client, CentrifugeException
 
 # Configure centrifuge logger
 import logging
@@ -13,118 +13,121 @@ handler.setLevel(logging.DEBUG)
 logger.addHandler(handler)
 
 
-def run():
+async def connecting_handler(**kwargs):
+    print("Connecting", kwargs)
 
-    # Generate credentials.
-    # In production this must only be done on backend side and you should
-    # never show secret to client!
-    user = "3000"
-    timestamp = str(int(time.time()))
-    info = json.dumps({"first_name": "Python", "last_name": "Client"})
-    token = generate_token("secret", user, timestamp, info=info)
 
-    credentials = Credentials(user, timestamp, info, token)
-    address = "ws://localhost:8000/connection/websocket"
+async def connected_handler(**kwargs):
+    print("Connected:", kwargs)
 
-    @asyncio.coroutine
-    def connect_handler(**kwargs):
-        print("Connected", kwargs)
 
-    @asyncio.coroutine
-    def disconnect_handler(**kwargs):
-        print("Disconnected:", kwargs)
+async def disconnected_handler(**kwargs):
+    print("Disconnected:", kwargs)
 
-    @asyncio.coroutine
-    def connect_error_handler(**kwargs):
-        print("Error:", kwargs)
 
-    @asyncio.coroutine
-    def private_sub_handler(**kwargs):
-        print("Private channel request:", kwargs)
-        client_id = kwargs.get("client_id")
-        channels = kwargs.get("channels")
-        data = {}
-        for channel in channels:
-            # in production here must be a call to your application backend to get
-            # private channel sign, in example we simply generate sign for every channel
-            # on client side using function from cent library for simplicity. Your real
-            # app clients should never see this secret key!
-            data[channel] = PrivateSign(generate_channel_sign("secret", client_id, channel))
+async def error_handler(**kwargs):
+    print("Error:", kwargs)
 
-        return data
 
-    client = Client(
-        address, credentials,
-        on_connect=connect_handler,
-        on_disconnect=disconnect_handler,
-        on_error=connect_error_handler,
-        on_private_sub=private_sub_handler
-    )
+async def subscribing_handler(**kwargs):
+    print("Subscribing:", kwargs)
 
-    yield from client.connect()
 
-    @asyncio.coroutine
-    def message_handler(**kwargs):
-        print("Message:", kwargs)
+async def subscribed_handler(**kwargs):
+    print("Subscribed:", kwargs)
 
-    @asyncio.coroutine
-    def join_handler(**kwargs):
-        print("Join:", kwargs)
 
-    @asyncio.coroutine
-    def leave_handler(**kwargs):
-        print("Leave:", kwargs)
+async def unsubscribed_handler(**kwargs):
+    print("Unsubscribed:", kwargs)
 
-    @asyncio.coroutine
-    def subscribe_handler(**kwargs):
-        print("Sub subscribed:", kwargs)
 
-    @asyncio.coroutine
-    def unsubscribe_handler(**kwargs):
-        print("Sub unsubscribed:", kwargs)
+async def publication_handler(**kwargs):
+    print("Publication:", kwargs)
 
-    @asyncio.coroutine
-    def error_handler(**kwargs):
-        print("Sub error:", kwargs)
 
-    sub = yield from client.subscribe(
+async def join_handler(**kwargs):
+    print("Join:", kwargs)
+
+
+async def leave_handler(**kwargs):
+    print("Leave:", kwargs)
+
+
+async def subscription_error_handler(**kwargs):
+    print("Subscription error:", kwargs)
+
+
+async def run(client: Client):
+    await client.connect()
+
+    sub = await client.subscribe(
         "public:chat",
-        on_message=message_handler,
+        on_subscribing=subscribing_handler,
+        on_subscribed=subscribed_handler,
+        on_unsubscribed=unsubscribed_handler,
+        on_error=subscription_error_handler,
+        on_publication=publication_handler,
         on_join=join_handler,
         on_leave=leave_handler,
-        on_error=error_handler,
-        on_subscribe=subscribe_handler,
-        on_unsubscribe=unsubscribe_handler
     )
 
     try:
-        success = yield from sub.publish({})
+        success = await sub.publish({})
     except CentrifugeException as e:
         print("Publish error:", type(e), e)
     else:
         print("Publish successful:", success)
 
     try:
-        history = yield from sub.history()
+        history = await sub.history()
     except CentrifugeException as e:
         print("Channel history error:", type(e), e)
     else:
         print("Channel history:", history)
 
     try:
-        presence = yield from sub.presence()
+        presence = await sub.presence()
     except CentrifugeException as e:
         print("Channel presence error:", type(e), e)
     else:
         print("Channel presence:", presence)
 
 
+async def shutdown(signal, loop, client: Client):
+    logging.info(f"Received exit signal {signal.name}...")
+    await client.disconnect()
+
+    tasks = [t for t in asyncio.all_tasks() if t is not
+             asyncio.current_task()]
+
+    for task in tasks:
+        task.cancel()
+
+    logging.info("Cancelling outstanding tasks")
+    await asyncio.gather(*tasks, return_exceptions=True)
+    loop.stop()
+
+
 if __name__ == '__main__':
+    cfClient = Client(
+        "ws://localhost:8000/connection/websocket",
+        on_connecting=connected_handler,
+        on_connected=connecting_handler,
+        on_disconnected=disconnected_handler,
+        on_error=error_handler,
+    )
+
     loop = asyncio.get_event_loop()
-    asyncio.ensure_future(run())
+
+    signals = (signal.SIGTERM, signal.SIGINT)
+    for s in signals:
+        loop.add_signal_handler(
+            s, lambda s=s: asyncio.create_task(shutdown(s, loop, cfClient)))
+
+    asyncio.ensure_future(run(cfClient))
+
     try:
         loop.run_forever()
-    except KeyboardInterrupt:
-        print("interrupted")
     finally:
+        logging.info("Successfully shutdown service")
         loop.close()
