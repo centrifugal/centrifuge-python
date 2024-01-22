@@ -3,11 +3,9 @@ import json
 import random
 import asyncio
 import logging
-
 from typing import Optional, Union, Dict, List, Coroutine
 from typing import Callable, Awaitable
 from dataclasses import dataclass
-
 import websockets
 from google.protobuf.json_format import ParseDict
 from google.protobuf.json_format import MessageToDict
@@ -19,184 +17,6 @@ logger = logging.getLogger('centrifuge')
 
 JSONType = Union[Dict[str, 'JSONType'], List['JSONType'], str, int, float, bool, None]
 BytesOrJSON = Union[bytes, JSONType]
-
-
-@dataclass
-class ConnectedContext:
-    client: str
-    version: str
-    data: Optional[BytesOrJSON]
-
-
-@dataclass
-class ConnectingContext:
-    code: int
-    reason: str
-
-
-@dataclass
-class DisconnectedContext:
-    code: int
-    reason: str
-
-
-@dataclass
-class ErrorContext:
-    error: Exception
-
-
-class _JsonCodec:
-    @staticmethod
-    def name():
-        return 'json'
-
-    @staticmethod
-    def encode_commands(commands):
-        return '\n'.join(json.dumps(command) for command in commands)
-
-    @staticmethod
-    def decode_replies(data):
-        return [json.loads(reply) for reply in data.strip().split('\n')]
-
-
-class _ProtobufCodec:
-    @staticmethod
-    def name():
-        return 'protobuf'
-
-    @staticmethod
-    def encode_commands(commands):
-        commands = [ParseDict(command, protocol.Command()) for command in commands]
-        return b''.join(varint_encode(len(msg.SerializeToString())) + msg.SerializeToString() for msg in commands)
-
-    @staticmethod
-    def decode_replies(data):
-        replies = []
-        position = 0
-        while position < len(data):
-            message_length, position = varint_decode(data, position)
-            message_end = position + message_length
-            message_bytes = data[position:message_end]
-            position = message_end
-
-            reply = protocol.Reply()
-            reply.ParseFromString(message_bytes)
-            replies.append(MessageToDict(reply, preserving_proto_field_name=True))
-        return replies
-
-
-def varint_encode(number):
-    """ Encode an integer as a varint. """
-    buffer = []
-    while True:
-        towrite = number & 0x7f
-        number >>= 7
-        if number:
-            buffer.append(towrite | 0x80)
-        else:
-            buffer.append(towrite)
-            break
-    return bytes(buffer)
-
-
-def varint_decode(buffer, position):
-    """Decode a varint from buffer starting at position."""
-    result = 0
-    shift = 0
-    while True:
-        byte = buffer[position]
-        position += 1
-        result |= (byte & 0x7f) << shift
-        shift += 7
-        if not byte & 0x80:
-            break
-    return result, position
-
-
-class _ConnectionEventHandler:
-    async def on_connecting(self, ctx: ConnectingContext):
-        """Called when connecting. This may be initial connecting, or
-        temporary loss of connection with automatic reconnect"""
-        pass
-
-    async def on_connected(self,  ctx: ConnectedContext):
-        """Called when connected."""
-        pass
-
-    async def on_disconnected(self, ctx: DisconnectedContext):
-        """Called when disconnected."""
-        pass
-
-    async def on_error(self, ctx: ErrorContext):
-        """Called when there's an error."""
-        pass
-
-
-@dataclass
-class SubscribingContext:
-    pass
-
-
-@dataclass
-class SubscribedContext:
-    pass
-
-
-@dataclass
-class UnsubscribedContext:
-    code: int
-    reason: str
-
-
-@dataclass
-class PublicationContext:
-    pass
-
-
-@dataclass
-class JoinContext:
-    pass
-
-
-@dataclass
-class LeaveContext:
-    pass
-
-
-@dataclass
-class SubscriptionErrorContext:
-    pass
-
-
-class SubscriptionEventHandler:
-    async def on_subscribing(self, ctx: SubscribingContext):
-        """Called when subscribing. This may be initial subscribing attempt,
-        or temporary loss with automatic resubscribe"""
-        pass
-
-    async def on_subscribed(self, ctx: SubscribedContext):
-        """Called when subscribed."""
-        pass
-
-    async def on_unsubscribed(self, ctx: UnsubscribedContext):
-        """Called when unsubscribed. No auto re-subscribing will happen after this"""
-        pass
-
-    async def on_publication(self, ctx: PublicationContext):
-        """Called when there's a publication coming from a channel"""
-        pass
-
-    async def on_join(self, ctx: JoinContext):
-        """Called when some client joined channel (join/leave must be enabled on server side)."""
-        pass
-
-    async def on_leave(self, ctx: LeaveContext):
-        """Called when some client left channel (join/leave must be enabled on server side)"""
-        pass
-
-    async def on_error(self, ctx: SubscriptionErrorContext):
-        """Called when various subscription async errors happen. In most cases this is only for logging purposes"""
-        pass
 
 
 class CentrifugeException(Exception):
@@ -239,6 +59,303 @@ class DuplicateSubscriptionError(CentrifugeException):
     pass
 
 
+class _JsonCodec:
+    @staticmethod
+    def name():
+        return 'json'
+
+    @staticmethod
+    def encode_commands(commands):
+        return '\n'.join(json.dumps(command) for command in commands)
+
+    @staticmethod
+    def decode_replies(data):
+        return [json.loads(reply) for reply in data.strip().split('\n')]
+
+
+class _ProtobufCodec:
+    @staticmethod
+    def name():
+        return 'protobuf'
+
+    @staticmethod
+    def encode_commands(commands):
+        serialized_commands = []
+        for command in commands:
+            serialized = ParseDict(command, protocol.Command()).SerializeToString()
+            serialized_commands.append(varint_encode(len(serialized)) + serialized)
+        return b''.join(serialized_commands)
+
+    @staticmethod
+    def decode_replies(data):
+        replies = []
+        position = 0
+        while position < len(data):
+            message_length, position = varint_decode(data, position)
+            message_end = position + message_length
+            message_bytes = data[position:message_end]
+            position = message_end
+
+            reply = protocol.Reply()
+            reply.ParseFromString(message_bytes)
+            replies.append(MessageToDict(reply, preserving_proto_field_name=True))
+        return replies
+
+
+def varint_encode(number):
+    """Encode an integer as a varint."""
+    buffer = []
+    while True:
+        towrite = number & 0x7f
+        number >>= 7
+        if number:
+            buffer.append(towrite | 0x80)
+        else:
+            buffer.append(towrite)
+            break
+    return bytes(buffer)
+
+
+def varint_decode(buffer, position):
+    """Decode a varint from buffer starting at position."""
+    result = 0
+    shift = 0
+    while True:
+        byte = buffer[position]
+        position += 1
+        result |= (byte & 0x7f) << shift
+        shift += 7
+        if not byte & 0x80:
+            break
+    return result, position
+
+
+@dataclass
+class StreamPosition:
+    offset: int
+    epoch: str
+
+
+@dataclass
+class ClientInfo:
+    client: str
+    user: str
+    conn_info: Optional[BytesOrJSON]
+    chan_info: Optional[BytesOrJSON]
+
+
+@dataclass
+class ConnectedContext:
+    client: str
+    version: str
+    data: Optional[BytesOrJSON]
+
+
+@dataclass
+class ConnectingContext:
+    code: int
+    reason: str
+
+
+@dataclass
+class DisconnectedContext:
+    code: int
+    reason: str
+
+
+@dataclass
+class ErrorContext:
+    error: CentrifugeException
+
+
+@dataclass
+class ServerSubscribingContext:
+    channel: str
+
+
+@dataclass
+class ServerSubscribedContext:
+    channel: str
+
+
+@dataclass
+class ServerUnsubscribedContext:
+    channel: str
+
+
+@dataclass
+class ServerPublicationContext:
+    channel: str
+    data: BytesOrJSON
+    info: Optional[ClientInfo]
+
+
+@dataclass
+class ServerJoinContext:
+    channel: str
+    info: ClientInfo
+
+
+@dataclass
+class ServerLeaveContext:
+    channel: str
+    info: ClientInfo
+
+
+@dataclass
+class SubscribingContext:
+    code: int
+    reason: str
+
+
+@dataclass
+class SubscribedContext:
+    channel: str
+    recoverable: bool
+    positioned: bool
+    stream_position: Optional[StreamPosition]
+    was_recovering: bool
+    recovered: bool
+    data: Optional[BytesOrJSON]
+
+
+@dataclass
+class UnsubscribedContext:
+    code: int
+    reason: str
+
+
+@dataclass
+class PublicationContext:
+    offset: Optional[int]
+    data: BytesOrJSON
+    info: Optional[ClientInfo]
+
+
+@dataclass
+class JoinContext:
+    info: ClientInfo
+
+
+@dataclass
+class LeaveContext:
+    info: ClientInfo
+
+
+@dataclass
+class SubscriptionErrorContext:
+    error: CentrifugeException
+
+
+@dataclass
+class PublishResult:
+    pass
+
+
+@dataclass
+class RpcResult:
+    data: BytesOrJSON
+
+
+@dataclass
+class PresenceResult:
+    clients: Dict[str, ClientInfo]
+
+
+@dataclass
+class PresenceStatsResult:
+    num_clients: int
+    num_users: int
+
+
+@dataclass
+class HistoryResult:
+    publications: List[PublicationContext]
+    offset: int
+    epoch: str
+
+
+@dataclass
+class HistoryOptions:
+    limit: Optional[int]
+    since: Optional[StreamPosition]
+    reverse: bool
+
+
+class _ConnectionEventHandler:
+    async def on_connecting(self, ctx: ConnectingContext):
+        """Called when connecting. This may be initial connecting, or
+        temporary loss of connection with automatic reconnect"""
+        pass
+
+    async def on_connected(self,  ctx: ConnectedContext):
+        """Called when connected."""
+        pass
+
+    async def on_disconnected(self, ctx: DisconnectedContext):
+        """Called when disconnected."""
+        pass
+
+    async def on_error(self, ctx: ErrorContext):
+        """Called when there's an error."""
+        pass
+
+    async def on_subscribed(self, ctx: ServerSubscribedContext):
+        """Called when subscribed on server-side subscription."""
+        pass
+
+    async def on_subscribing(self, ctx: ServerSubscribingContext):
+        """Called when subscribing to server-side subscription."""
+        pass
+
+    async def on_unsubscribed(self, ctx: ServerUnsubscribedContext):
+        """Called when unsubscribed from server-side subscription."""
+        pass
+
+    async def on_publication(self, ctx: ServerPublicationContext):
+        """Called when there's a publication coming from a server-side subscription."""
+        pass
+
+    async def on_join(self, ctx: ServerJoinContext):
+        """Called when some client joined channel in server-side subscription."""
+        pass
+
+    async def on_leave(self, ctx: ServerLeaveContext):
+        """Called when some client left channel in server-side subscription."""
+        pass
+
+
+class _SubscriptionEventHandler:
+    async def on_subscribing(self, ctx: SubscribingContext):
+        """Called when subscribing. This may be initial subscribing attempt,
+        or temporary loss with automatic resubscribe"""
+        pass
+
+    async def on_subscribed(self, ctx: SubscribedContext):
+        """Called when subscribed."""
+        pass
+
+    async def on_unsubscribed(self, ctx: UnsubscribedContext):
+        """Called when unsubscribed. No auto re-subscribing will happen after this"""
+        pass
+
+    async def on_publication(self, ctx: PublicationContext):
+        """Called when there's a publication coming from a channel"""
+        pass
+
+    async def on_join(self, ctx: JoinContext):
+        """Called when some client joined channel (join/leave must be enabled on server side)."""
+        pass
+
+    async def on_leave(self, ctx: LeaveContext):
+        """Called when some client left channel (join/leave must be enabled on server side)"""
+        pass
+
+    async def on_error(self, ctx: SubscriptionErrorContext):
+        """Called when various subscription async errors happen. In most cases this is only for logging purposes"""
+        pass
+
+
 STATE_DISCONNECTED = 'disconnected'
 STATE_CONNECTING = 'connecting'
 STATE_CONNECTED = 'connected'
@@ -269,7 +386,6 @@ class Client:
             loop=None
     ):
         self.address = address
-
         self._events = _ConnectionEventHandler()
 
         self.use_protobuf = use_protobuf
@@ -288,6 +404,7 @@ class Client:
         self._data = data
         self._timeout = timeout,
         self._send_pong = True
+        self._ping_interval = 0
         self._max_server_ping_delay = max_server_ping_delay
         self._ping_timer = None
         self._future = None
@@ -305,30 +422,29 @@ class Client:
     def on_disconnected(self, handler: Callable[[DisconnectedContext], Coroutine[None, None, None]]):
         self._events.on_disconnected = handler
 
-    def on_error(self, handler):
+    def on_error(self, handler: Callable[[ErrorContext], Coroutine[None, None, None]]):
         self._events.on_error = handler
 
-    def subscriptions(self):
+    def subscriptions(self) -> Dict[str, 'Subscription']:
         return self._subs.copy()
 
     def new_subscription(
             self,
             channel: str,
-            events: Optional[SubscriptionEventHandler] = None,
             token: str = '',
             get_token: Optional[Callable[..., Awaitable[None]]] = None,
             **kwargs,
     ):
         if self.get_subscription(channel):
             raise DuplicateSubscriptionError('subscription to channel "' + channel + '" is already registered')
-        sub = Subscription(self, channel, events=events, token=token, get_token=get_token, **kwargs)
+        sub = Subscription(self, channel, token=token, get_token=get_token, **kwargs)
         self._subs[channel] = sub
         return sub
 
-    def get_subscription(self, channel):
+    def get_subscription(self, channel: str) -> Optional['Subscription']:
         return self._subs.get(channel)
 
-    def remove_subscription(self, sub):
+    def remove_subscription(self, sub: 'Subscription'):
         if not sub:
             return
         del self._subs[sub.channel]
@@ -382,7 +498,7 @@ class Client:
         self._id += 1
         return self._id
 
-    async def _create_connection(self):
+    async def _create_connection(self) -> bool:
         subprotocols = []
         if self.use_protobuf:
             subprotocols = ["centrifuge-protobuf"]
@@ -411,24 +527,6 @@ class Client:
         success = await self._future
         return success
 
-    async def _send_ping(self):
-        if self.status != STATE_CONNECTED:
-            return
-
-        uid = uuid.uuid4().hex
-        message = self._get_message("ping", {}, uid=uid)
-
-        try:
-            await self._conn.send(json.dumps(message))
-        except websockets.ConnectionClosed:
-            return
-
-        future = self._register_future(uid, self._pong_wait_timeout)
-        try:
-            await future
-        except Timeout:
-            await self._disconnect("no ping", True)
-
     async def connect(self):
         self.state = STATE_CONNECTING
         handler = self._events.on_connecting
@@ -444,11 +542,11 @@ class Client:
     async def disconnect(self):
         await self._disconnect('clean disconnect', False)
 
-    async def subscribe(self, channel, **kwargs):
-        sub = Subscription(self, channel, **kwargs)
-        self._subs[channel] = sub
-        asyncio.ensure_future(self._subscribe([channel]))
-        return sub
+    # async def subscribe(self, channel, **kwargs):
+    #     sub = Subscription(self, channel, **kwargs)
+    #     self._subs[channel] = sub
+    #     asyncio.ensure_future(self._subscribe([channel]))
+    #     return sub
 
     async def _subscribe(self, channels):
         if not channels:
@@ -497,12 +595,12 @@ class Client:
         asyncio.ensure_future(self._subscribe([sub.channel]))
 
     async def _unsubscribe(self, sub):
-
         if sub.channel in self._subs:
             del self._subs[sub.channel]
 
         message = self._get_message("unsubscribe", {'channel': sub.channel})
 
+        # noinspection PyProtectedMember
         handler = sub._events.on_unsubscribed
         if handler:
             await handler(UnsubscribedContext(code=0, reason='not implemented'))
@@ -540,11 +638,9 @@ class Client:
         future.set_result(result)
         del self._futures[uid]
 
-    async def _history(self, sub, timeout=None):
+    async def _history(self, sub, timeout=None) -> HistoryResult:
         # if sub.channel not in self._subs:
         #     raise CallError("subscription not in subscribed state")
-
-        await sub._future
 
         uid = uuid.uuid4().hex
         message = self._get_message("history", {'channel': sub.channel}, uid=uid)
@@ -558,11 +654,9 @@ class Client:
         result = await future
         return result
 
-    async def _presence(self, sub, timeout=None):
+    async def _presence(self, sub, timeout=None) -> PresenceResult:
         # if sub.channel not in self._subs:
         #     raise CallError("subscription not in subscribed state")
-
-        await sub._future
 
         uid = uuid.uuid4().hex
         message = self._get_message("presence", {'channel': sub.channel}, uid=uid)
@@ -576,11 +670,9 @@ class Client:
         result = await future
         return result
 
-    async def _presence_stats(self, sub, timeout=None):
+    async def _presence_stats(self, sub, timeout=None) -> PresenceStatsResult:
         # if sub.channel not in self._subs:
         #     raise CallError("subscription not in subscribed state")
-
-        await sub._future
 
         uid = uuid.uuid4().hex
         message = self._get_message("presence_stats", {'channel': sub.channel}, uid=uid)
@@ -594,14 +686,28 @@ class Client:
         result = await future
         return result
 
-    async def _publish(self, sub, data, timeout=None):
+    async def _publish(self, sub, data, timeout=None) -> PublishResult:
         # if sub.channel not in self._subs:
         #     raise CallError("subscription not in subscribed state")
 
-        await sub._future
-
         uid = uuid.uuid4().hex
         message = self._get_message("publish", {'channel': sub.channel, 'data': data}, uid=uid)
+
+        try:
+            await self._conn.send(json.dumps(message))
+        except websockets.ConnectionClosed:
+            raise ConnectionClosed
+
+        future = self._register_future(uid, timeout or self._timeout)
+        result = await future
+        return result
+
+    async def _rpc(self, method, data, timeout=None) -> RpcResult:
+        # if sub.channel not in self._subs:
+        #     raise CallError("subscription not in subscribed state")
+
+        uid = uuid.uuid4().hex
+        message = self._get_message("rpc", {'method': method, 'data': data}, uid=uid)
 
         try:
             await self._conn.send(json.dumps(message))
@@ -631,6 +737,7 @@ class Client:
 
         for ch, sub in self._subs.items():
             sub._future = asyncio.Future()
+            # noinspection PyProtectedMember
             handler = sub._events.on_unsubscribed
             if sub.state != SUBSCRIPTION_STATE_UNSUBSCRIBED and handler:
                 await handler(UnsubscribedContext(code=0, reason='not implemented'))
@@ -639,7 +746,7 @@ class Client:
         if handler:
             await handler(DisconnectedContext(
                 code=0,
-                reason='not implemented'
+                reason=reason
             ))
 
         if reconnect:
@@ -659,10 +766,10 @@ class Client:
             self.client_id = connect['client']
             self.state = STATE_CONNECTED
             self._send_pong = connect.get('pong', False)
-            self._ping_timer = self._loop.call_later(
-                connect.get('ping') + self._max_server_ping_delay,
-                lambda: asyncio.ensure_future(self._no_ping(), loop=self._loop)
-            )
+            self._ping_interval = connect.get('ping', 0)
+            if self._ping_interval > 0:
+                self._restart_ping_wait()
+
             handler = self._events.on_connected
             if handler:
                 await handler(ConnectedContext(
@@ -679,11 +786,20 @@ class Client:
     async def _no_ping(self):
         await self._close()
 
+    def _restart_ping_wait(self):
+        if self._ping_timer:
+            self._ping_timer.cancel()
+        self._ping_timer = self._loop.call_later(
+            self._ping_interval + self._max_server_ping_delay,
+            lambda: asyncio.ensure_future(self._no_ping(), loop=self._loop)
+        )
+
     async def _handle_ping(self):
         logger.debug("received ping from server")
         if self._send_pong:
             logger.debug("respond with pong")
             await self._send_commands([{}])
+        self._restart_ping_wait()
 
     async def _send_commands(self, commands):
         logger.debug("send commands: %s", str(commands))
@@ -783,17 +899,6 @@ class Client:
         else:
             self._future_success(uid, response.get("body", {}).get("data", []))
 
-    async def _process_ping(self, response):
-        uid = response.get("uid")
-        if not uid:
-            return
-
-        error = response.get("error")
-        if error:
-            self._future_error(uid, error)
-        else:
-            self._future_success(uid, response.get("body", {}).get("data", ""))
-
     async def _process_disconnect(self, response):
         logger.debug("disconnect received")
         body = response.get("body", {})
@@ -802,14 +907,6 @@ class Client:
         await self._disconnect(reason, reconnect)
 
     async def _process_reply(self, reply):
-        # # Restart ping timer every time we received something from connection.
-        # # This allows us to reduce amount of pings sent around in busy apps.
-        # if self._ping_timer:
-        #     self._ping_timer.cancel()
-        #     self._ping_timer = self._loop.call_later(
-        #         self._ping_timeout, lambda: asyncio.ensure_future(self._send_ping(), loop=self._loop)
-        #     )
-
         if reply.get('id', 0) > 0:
             if reply.get('connect'):
                 await self._handle_connect(reply)
@@ -819,32 +916,6 @@ class Client:
             logger.debug("received push reply %s", str(reply))
         else:
             await self._handle_ping()
-
-        # method = response.get("method")
-        # if method:
-        #     cb = None
-        #     if method == 'connect':
-        #         cb = self._process_connect
-        #     elif method == 'subscribe':
-        #         cb = self._process_subscribe
-        #     elif method == 'message':
-        #         cb = self._process_message
-        #     elif method == 'join':
-        #         cb = self._process_join
-        #     elif method == 'leave':
-        #         cb = self._process_leave
-        #     elif method == 'disconnect':
-        #         cb = self._process_disconnect
-        #     elif method == 'publish':
-        #         cb = self._process_publish
-        #     elif method == 'presence':
-        #         cb = self._process_presence
-        #     elif method == 'history':
-        #         cb = self._process_history
-        #     elif method == 'ping':
-        #         cb = self._process_ping
-        #     if cb:
-        #         await cb(reply)
 
     async def _process_incoming_data(self, message):
         logger.debug("start parsing message: %s", str(message))
@@ -903,7 +974,7 @@ class Subscription:
             self,
             client,
             channel,
-            events: Optional[SubscriptionEventHandler] = None,
+            # events: Optional[_SubscriptionEventHandler] = None,
             token: str = '',
             get_token: Optional[Callable[..., Awaitable[None]]] = None,
             **kwargs
@@ -912,7 +983,7 @@ class Subscription:
         self.state = SUBSCRIPTION_STATE_UNSUBSCRIBED
         self._subscribed = False
         self._client = client
-        self._events = SubscriptionEventHandler()
+        self._events = _SubscriptionEventHandler()
         self.channel = channel
 
     def on_subscribing(self, handler: Callable[[SubscribingContext], Coroutine[None, None, None]]):
@@ -937,22 +1008,35 @@ class Subscription:
         self._events.on_error = handler
 
     async def unsubscribe(self):
+        if self.state == SUBSCRIPTION_STATE_UNSUBSCRIBED:
+            return
         self.state = SUBSCRIPTION_STATE_UNSUBSCRIBED
+        # noinspection PyProtectedMember
         await self._client._unsubscribe(self)
 
     async def subscribe(self):
+        if self.state == SUBSCRIPTION_STATE_SUBSCRIBING:
+            return
         self.state = SUBSCRIPTION_STATE_SUBSCRIBING
+        # noinspection PyProtectedMember
         await self._client._resubscribe(self)
 
-    async def history(self, timeout=None):
-        res = await self._client._history(self, timeout=timeout)
-        return res
+    async def history(self, timeout=None) -> HistoryResult:
+        await self._future
+        # noinspection PyProtectedMember
+        return await self._client._history(self, timeout=timeout)
 
-    async def presence(self, timeout=None):
+    async def presence(self, timeout=None) -> PresenceResult:
+        await self._future
+        # noinspection PyProtectedMember
         return await self._client._presence(self, timeout=timeout)
 
-    async def presence_stats(self, timeout=None):
+    async def presence_stats(self, timeout=None) -> PresenceStatsResult:
+        await self._future
+        # noinspection PyProtectedMember
         return await self._client._presence_stats(self, timeout=timeout)
 
-    async def publish(self, data, timeout=None):
+    async def publish(self, data, timeout=None) -> PublishResult:
+        await self._future
+        # noinspection PyProtectedMember
         return await self._client._publish(self, data, timeout=timeout)

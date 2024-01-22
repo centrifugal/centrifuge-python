@@ -87,7 +87,7 @@ if __name__ == '__main__':
         token='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsImV4cCI6MTcwNjU0NTA0MCwiaWF0IjoxNzA1OTQwMjQwfQ.'
               'HQyladwnFFjkxkZ7L4bYteUmWTxCgh5wbx8qcnIQfAU',
         # get_token=get_token,
-        use_protobuf=False,
+        use_protobuf=True,
     )
 
     client.on_connecting(connecting_handler)
