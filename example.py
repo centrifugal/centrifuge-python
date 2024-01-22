@@ -1,101 +1,73 @@
-import time
-import json
 import asyncio
 import signal
-from centrifuge import Client, CentrifugeException
 
-# Configure centrifuge logger
+from centrifuge import Client, \
+    ConnectedContext, ConnectingContext, DisconnectedContext, ErrorContext, SubscriptionErrorContext, LeaveContext, \
+    JoinContext, PublicationContext, UnsubscribedContext, SubscribedContext, SubscribingContext
+
+# Configure logging.
 import logging
-logger = logging.getLogger('centrifuge')
-logger.setLevel(logging.DEBUG)
-handler = logging.StreamHandler()
-handler.setLevel(logging.DEBUG)
-logger.addHandler(handler)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
+cf_logger = logging.getLogger('centrifuge')
+cf_logger.setLevel(logging.DEBUG)
 
 
-async def connecting_handler(**kwargs):
-    print("Connecting", kwargs)
+async def connecting_handler(ctx: ConnectingContext):
+    logging.info("connecting: %s", ctx)
 
 
-async def connected_handler(**kwargs):
-    print("Connected:", kwargs)
+async def connected_handler(ctx: ConnectedContext):
+    logging.info("connected: %s", ctx)
 
 
-async def disconnected_handler(**kwargs):
-    print("Disconnected:", kwargs)
+async def disconnected_handler(ctx: DisconnectedContext):
+    logging.info("disconnected: %s", ctx)
 
 
-async def error_handler(**kwargs):
-    print("Error:", kwargs)
+async def error_handler(ctx: ErrorContext):
+    logging.error("client error: %s", ctx.error)
 
 
-async def subscribing_handler(**kwargs):
-    print("Subscribing:", kwargs)
+async def subscribing_handler(ctx: SubscribingContext):
+    logging.info("subscribing: %s", ctx)
 
 
-async def subscribed_handler(**kwargs):
-    print("Subscribed:", kwargs)
+async def subscribed_handler(ctx: SubscribedContext):
+    logging.info("subscribed: %s", ctx)
 
 
-async def unsubscribed_handler(**kwargs):
-    print("Unsubscribed:", kwargs)
+async def unsubscribed_handler(ctx: UnsubscribedContext):
+    logging.info("unsubscribed: %s", ctx)
 
 
-async def publication_handler(**kwargs):
-    print("Publication:", kwargs)
+async def publication_handler(ctx: PublicationContext):
+    logging.info("publication: %s", ctx)
 
 
-async def join_handler(**kwargs):
-    print("Join:", kwargs)
+async def join_handler(ctx: JoinContext):
+    logging.info("join: %s", ctx)
 
 
-async def leave_handler(**kwargs):
-    print("Leave:", kwargs)
+async def leave_handler(ctx: LeaveContext):
+    logging.info("leave: %s", ctx)
 
 
-async def subscription_error_handler(**kwargs):
-    print("Subscription error:", kwargs)
+async def subscription_error_handler(ctx: SubscriptionErrorContext):
+    logging.info("subscription error: %s", ctx)
 
 
-async def run(client: Client):
-    await client.connect()
-
-    sub = await client.subscribe(
-        "public:chat",
-        on_subscribing=subscribing_handler,
-        on_subscribed=subscribed_handler,
-        on_unsubscribed=unsubscribed_handler,
-        on_error=subscription_error_handler,
-        on_publication=publication_handler,
-        on_join=join_handler,
-        on_leave=leave_handler,
-    )
-
-    try:
-        success = await sub.publish({})
-    except CentrifugeException as e:
-        print("Publish error:", type(e), e)
-    else:
-        print("Publish successful:", success)
-
-    try:
-        history = await sub.history()
-    except CentrifugeException as e:
-        print("Channel history error:", type(e), e)
-    else:
-        print("Channel history:", history)
-
-    try:
-        presence = await sub.presence()
-    except CentrifugeException as e:
-        print("Channel presence error:", type(e), e)
-    else:
-        print("Channel presence:", presence)
+async def get_token():
+    return 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsImV4cCI6MTcwNjU0NTA0MCwiaWF0IjoxNzA1OTQwMjQwfQ.' \
+           'HQyladwnFFjkxkZ7L4bYteUmWTxCgh5wbx8qcnIQfAU'
 
 
-async def shutdown(signal, loop, client: Client):
-    logging.info(f"Received exit signal {signal.name}...")
-    await client.disconnect()
+async def shutdown(received_signal, current_loop, cf_client: Client):
+    logging.info(f"Received exit signal {received_signal.name}...")
+    await cf_client.disconnect()
 
     tasks = [t for t in asyncio.all_tasks() if t is not
              asyncio.current_task()]
@@ -105,29 +77,40 @@ async def shutdown(signal, loop, client: Client):
 
     logging.info("Cancelling outstanding tasks")
     await asyncio.gather(*tasks, return_exceptions=True)
-    loop.stop()
+    current_loop.stop()
 
 
 if __name__ == '__main__':
-    cfClient = Client(
-        "ws://localhost:8000/connection/websocket",
-        on_connecting=connected_handler,
-        on_connected=connecting_handler,
-        on_disconnected=disconnected_handler,
-        on_error=error_handler,
+    client = Client(
+        'ws://localhost:8000/connection/websocket',
+        # REPLACE with your own!
+        token='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsImV4cCI6MTcwNjU0NTA0MCwiaWF0IjoxNzA1OTQwMjQwfQ.'
+              'HQyladwnFFjkxkZ7L4bYteUmWTxCgh5wbx8qcnIQfAU',
+        # get_token=get_token,
+        use_protobuf=False,
     )
+
+    client.on_connecting(connecting_handler)
+    client.on_connected(connected_handler)
+    client.on_disconnected(disconnected_handler)
+    client.on_error(error_handler)
+
+    sub = client.new_subscription('channel')
+    sub.on_subscribing(subscribing_handler)
+    sub.on_subscribed(subscribed_handler)
+    sub.on_unsubscribed(unsubscribed_handler)
+
+    asyncio.ensure_future(client.connect())
+    asyncio.ensure_future(sub.subscribe())
 
     loop = asyncio.get_event_loop()
 
     signals = (signal.SIGTERM, signal.SIGINT)
     for s in signals:
-        loop.add_signal_handler(
-            s, lambda s=s: asyncio.create_task(shutdown(s, loop, cfClient)))
-
-    asyncio.ensure_future(run(cfClient))
+        loop.add_signal_handler(s, lambda ts=s: asyncio.create_task(shutdown(ts, loop, client)))
 
     try:
         loop.run_forever()
     finally:
-        logging.info("Successfully shutdown service")
         loop.close()
+        logging.info("successfully completed service shutdown")
