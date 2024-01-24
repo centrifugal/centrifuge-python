@@ -62,6 +62,7 @@ async def subscription_error_handler(ctx: SubscriptionErrorContext):
 
 
 async def get_token():
+    # REPLACE with your own logic to get token from the backend!
     return 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsImV4cCI6MTcwNjU0NTA0MCwiaWF0IjoxNzA1OTQwMjQwfQ.' \
            'HQyladwnFFjkxkZ7L4bYteUmWTxCgh5wbx8qcnIQfAU'
 
