@@ -1,3 +1,4 @@
+import base64
 import uuid
 import json
 import random
@@ -27,9 +28,20 @@ class CentrifugeException(Exception):
     pass
 
 
-class ConnectionClosed(CentrifugeException):
+class ClientDisconnected(CentrifugeException):
     """
     ConnectionClosed raised when underlying websocket connection closed.
+    """
+    pass
+
+
+class DuplicateSubscription(CentrifugeException):
+    pass
+
+
+class SubscriptionUnsubscribed(CentrifugeException):
+    """
+    SubscriptionUnsubscribedError raised when an error subscribing on channel occurred.
     """
     pass
 
@@ -41,22 +53,15 @@ class Timeout(CentrifugeException):
     pass
 
 
-class SubscriptionError(CentrifugeException):
-    """
-    SubscriptionError raised when an error subscribing on channel occurred.
-    """
-    pass
-
-
 class ReplyError(CentrifugeException):
     """
     ReplyError raised when an error returned from server as result of presence/history/publish call.
     """
-    pass
-
-
-class DuplicateSubscriptionError(CentrifugeException):
-    pass
+    def __init__(self, code: int, message: str, temporary: bool):
+        self.code = code
+        self.message = message
+        self.temporary = temporary
+        super().__init__(f"Error {code}: {message} (temporary: {temporary})")
 
 
 class _JsonCodec:
@@ -84,6 +89,8 @@ class _ProtobufCodec:
         for command in commands:
             serialized = ParseDict(command, protocol.Command()).SerializeToString()
             serialized_commands.append(varint_encode(len(serialized)) + serialized)
+
+        print(b''.join(serialized_commands))
         return b''.join(serialized_commands)
 
     @staticmethod
@@ -390,7 +397,7 @@ class Client:
         self.address = address
         self._events = _ConnectionEventHandler()
 
-        self.use_protobuf = use_protobuf
+        self._use_protobuf = use_protobuf
         if use_protobuf:
             self.codec = _ProtobufCodec
 
@@ -456,7 +463,7 @@ class Client:
             **kwargs,
     ):
         if self.get_subscription(channel):
-            raise DuplicateSubscriptionError('subscription to channel "' + channel + '" is already registered')
+            raise DuplicateSubscription('subscription to channel "' + channel + '" is already registered')
         sub = Subscription(self, channel, token=token, get_token=get_token, **kwargs)
         self._subs[channel] = sub
         return sub
@@ -515,7 +522,7 @@ class Client:
 
     async def _create_connection(self) -> bool:
         subprotocols = []
-        if self.use_protobuf:
+        if self._use_protobuf:
             subprotocols = ["centrifuge-protobuf"]
         try:
             self._conn = await websockets.connect(self.address, subprotocols=subprotocols)
@@ -686,7 +693,6 @@ class Client:
                     future.set_exception(Timeout)
                     del self._futures[cmd_id]
 
-            print(timeout)
             self._loop.call_later(timeout, cb)
 
         return future
@@ -705,84 +711,101 @@ class Client:
         future.set_result(reply)
         del self._futures[cmd_id]
 
+    def _decode_data(self, data: BytesOrJSON):
+        if self._use_protobuf:
+            if isinstance(data, str):
+                return base64.b64decode(data)
+            return data
+        else:
+            return data
+
+    def _encode_data(self, data: BytesOrJSON):
+        if self._use_protobuf:
+            if not isinstance(data, bytes):
+                raise CentrifugeException('when using Protobuf protocol you must encode payloads to bytes')
+            return base64.b64encode(data)
+        else:
+            if isinstance(data, bytes):
+                raise CentrifugeException('when using JSON protocol you can not encode payloads to bytes')
+            return data
+
+    @staticmethod
+    def _check_reply_error(reply):
+        if reply.get('error'):
+            error = reply['error']
+            raise ReplyError(error['code'], error['message'], error.get('temporary', False))
+
     async def publish(self, channel: str, data: BytesOrJSON, timeout=None) -> PublishResult:
-        # if sub.channel not in self._subs:
-        #     raise CallError("subscription not in subscribed state")
         cmd_id = self._next_command_id()
         command = {
             'id': cmd_id,
             'publish': {
                 'channel': channel,
-                'data': data
+                'data': self._encode_data(data)
             }
         }
         future = self._register_future(cmd_id, timeout or self._timeout)
         await self._send_commands([command])
-        result = await future
-        return result
+        reply = await future
+        self._check_reply_error(reply)
+        return PublishResult()
 
     async def history(self, channel: str, timeout=None) -> HistoryResult:
-        # if sub.channel not in self._subs:
-        #     raise CallError("subscription not in subscribed state")
         cmd_id = self._next_command_id()
         command = {
             'id': cmd_id,
             'history': {
-                'channel': channel
+                'channel': channel,
             }
         }
         future = self._register_future(cmd_id, timeout or self._timeout)
         await self._send_commands([command])
-        result = await future
-        return result
+        reply = await future
+        self._check_reply_error(reply)
+        return HistoryResult()
 
-    async def _presence(self, sub, timeout=None) -> PresenceResult:
-        # if sub.channel not in self._subs:
-        #     raise CallError("subscription not in subscribed state")
+    async def presence(self, channel: str, timeout=None) -> PresenceResult:
+        cmd_id = self._next_command_id()
+        command = {
+            'id': cmd_id,
+            'presence': {
+                'channel': channel,
+            }
+        }
+        future = self._register_future(cmd_id, timeout or self._timeout)
+        await self._send_commands([command])
+        reply = await future
+        self._check_reply_error(reply)
+        return PresenceResult()
 
-        uid = uuid.uuid4().hex
-        message = self._get_message("presence", {'channel': sub.channel}, uid=uid)
+    async def _presence_stats(self, channel: str, timeout=None) -> PresenceStatsResult:
+        cmd_id = self._next_command_id()
+        command = {
+            'id': cmd_id,
+            'presence_stats': {
+                'channel': channel,
+            }
+        }
+        future = self._register_future(cmd_id, timeout or self._timeout)
+        await self._send_commands([command])
+        reply = await future
+        self._check_reply_error(reply)
+        return PresenceStatsResult()
 
-        try:
-            await self._conn.send(json.dumps(message))
-        except websockets.ConnectionClosed:
-            raise ConnectionClosed
-
-        future = self._register_future(uid, timeout or self._timeout)
-        result = await future
-        return result
-
-    async def _presence_stats(self, sub, timeout=None) -> PresenceStatsResult:
-        # if sub.channel not in self._subs:
-        #     raise CallError("subscription not in subscribed state")
-
-        uid = uuid.uuid4().hex
-        message = self._get_message("presence_stats", {'channel': sub.channel}, uid=uid)
-
-        try:
-            await self._conn.send(json.dumps(message))
-        except websockets.ConnectionClosed:
-            raise ConnectionClosed
-
-        future = self._register_future(uid, timeout or self._timeout)
-        result = await future
-        return result
-
-    async def _rpc(self, method, data, timeout=None) -> RpcResult:
-        # if sub.channel not in self._subs:
-        #     raise CallError("subscription not in subscribed state")
-
-        uid = uuid.uuid4().hex
-        message = self._get_message("rpc", {'method': method, 'data': data}, uid=uid)
-
-        try:
-            await self._conn.send(json.dumps(message))
-        except websockets.ConnectionClosed:
-            raise ConnectionClosed
-
-        future = self._register_future(uid, timeout or self._timeout)
-        result = await future
-        return result
+    async def rpc(self, method: str, data: BytesOrJSON, timeout=None) -> RpcResult:
+        cmd_id = self._next_command_id()
+        command = {
+            'id': cmd_id,
+            'publish': {
+                'method': method,
+                'data': self._encode_data(data)
+            }
+        }
+        future = self._register_future(cmd_id, timeout or self._timeout)
+        await self._send_commands([command])
+        reply = await future
+        self._check_reply_error(reply)
+        return RpcResult()
 
     async def _disconnect(self, reason, reconnect):
         if self._ping_timer:
@@ -919,6 +942,17 @@ class Client:
             self._future_success(reply['id'], reply)
         elif reply.get('push'):
             logger.debug("received push reply %s", str(reply))
+            push = reply['push']
+            if 'pub' in push:
+                pub = push['pub']
+                sub = self._subs.get(push['channel'], None)
+                if not sub:
+                    return
+                await sub._events.on_publication(PublicationContext(
+                    offset=0,
+                    data=self._decode_data(pub.get('data')),
+                    info=None
+                ))
         else:
             await self._handle_ping()
 
@@ -1041,7 +1075,7 @@ class Subscription:
         # noinspection PyProtectedMember
         return await self._client.presence_stats(self.channel, timeout=timeout)
 
-    async def publish(self, data, timeout=None) -> PublishResult:
+    async def publish(self, data: BytesOrJSON, timeout=None) -> PublishResult:
         await self._future
         # noinspection PyProtectedMember
         return await self._client.publish(self.channel, data, timeout=timeout)

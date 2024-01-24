@@ -1,4 +1,5 @@
 import asyncio
+import json
 import signal
 
 from centrifuge import Client, \
@@ -45,7 +46,7 @@ async def unsubscribed_handler(ctx: UnsubscribedContext):
 
 
 async def publication_handler(ctx: PublicationContext):
-    logging.info("publication: %s", ctx)
+    logging.info("publication: %s", ctx.data)
 
 
 async def join_handler(ctx: JoinContext):
@@ -80,6 +81,15 @@ async def shutdown(received_signal, current_loop, cf_client: Client):
     current_loop.stop()
 
 
+async def run():
+    asyncio.ensure_future(client.connect())
+    asyncio.ensure_future(sub.subscribe())
+    await asyncio.sleep(1)
+    # result = await sub.publish(data=json.dumps({"input": "test"}).encode()) 
+    result = await sub.publish(data={"input": "test"}) 
+    print(result)
+
+
 if __name__ == '__main__':
     client = Client(
         'ws://localhost:8000/connection/websocket',
@@ -87,7 +97,7 @@ if __name__ == '__main__':
         token='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsImV4cCI6MTcwNjU0NTA0MCwiaWF0IjoxNzA1OTQwMjQwfQ.'
               'HQyladwnFFjkxkZ7L4bYteUmWTxCgh5wbx8qcnIQfAU',
         # get_token=get_token,
-        use_protobuf=True,
+        use_protobuf=False,
     )
 
     client.on_connecting(connecting_handler)
@@ -99,9 +109,9 @@ if __name__ == '__main__':
     sub.on_subscribing(subscribing_handler)
     sub.on_subscribed(subscribed_handler)
     sub.on_unsubscribed(unsubscribed_handler)
+    sub.on_publication(publication_handler)
 
-    asyncio.ensure_future(client.connect())
-    asyncio.ensure_future(sub.subscribe())
+    asyncio.ensure_future(run())
 
     loop = asyncio.get_event_loop()
 
