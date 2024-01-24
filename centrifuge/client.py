@@ -404,7 +404,7 @@ class Client:
         self._name = name
         self._version = version
         self._data = data
-        self._timeout = timeout,
+        self._timeout = timeout
         self._send_pong = True
         self._ping_interval = 0
         self._max_server_ping_delay = max_server_ping_delay
@@ -498,12 +498,7 @@ class Client:
 
         self._delay = self._exponential_backoff(self._delay)
         await asyncio.sleep(self._delay)
-        success = await self._create_connection()
-        if success:
-            success = await self._subscribe(self._subs.keys())
-
-        if not success:
-            asyncio.ensure_future(self._schedule_reconnect())
+        await self._create_connection()
 
     @staticmethod
     def _get_message(method, params, uid=None):
@@ -525,6 +520,7 @@ class Client:
         try:
             self._conn = await websockets.connect(self.address, subprotocols=subprotocols)
         except OSError:
+            asyncio.ensure_future(self._schedule_reconnect())
             return False
 
         self._delay = self.reconnect_backoff_min_delay
@@ -532,20 +528,53 @@ class Client:
         if self._token:
             connect['token'] = self._token
 
+        cmd_id = self._next_command_id()
+
         command = {
-            'id': self._next_command_id(),
+            'id': cmd_id,
             'connect': connect
         }
-        ok = await self._send_commands([command])
-        if not ok:
-            return False
+        future = self._register_future(cmd_id, self._timeout)
 
         asyncio.ensure_future(self._listen())
         asyncio.ensure_future(self._process_messages())
 
-        self._future = asyncio.Future()
-        success = await self._future
-        return success
+        ok = await self._send_commands([command])
+        if not ok:
+            return False
+
+        reply = await future
+        logger.info(reply)
+        if reply.get('error'):
+            logger.debug("connect reply has error: %s", reply.get('error'))
+            if self._future:
+                self._future.set_result(False)
+            await self._close()
+            handler = self._events.on_error
+            if handler:
+                await handler(ErrorContext(error=CentrifugeException()))
+        else:
+            connect = reply['connect']
+            self.client_id = connect['client']
+            self.state = STATE_CONNECTED
+            self._send_pong = connect.get('pong', False)
+            self._ping_interval = connect.get('ping', 0)
+            if self._ping_interval > 0:
+                self._restart_ping_wait()
+
+            handler = self._events.on_connected
+            if handler:
+                await handler(ConnectedContext(
+                    client=connect.get('client'),
+                    version=connect.get('version', ''),
+                    data=None
+                ))
+            if self._future:
+                self._future.set_result(True)
+
+            channels = self._subs.keys()
+            for channel in channels:
+                asyncio.ensure_future(self._subscribe(channel))
 
     async def connect(self):
         if self.state == STATE_CONNECTING:
@@ -557,58 +586,79 @@ class Client:
                 code=0,
                 reason='not implemented'
             ))
-        success = await self._create_connection()
-        if not success:
-            asyncio.ensure_future(self._schedule_reconnect())
+        await self._create_connection()
+        # if not success:
+        #     asyncio.ensure_future(self._schedule_reconnect())
 
     async def disconnect(self):
         await self._disconnect('clean disconnect', False)
 
-    async def _subscribe(self, channels):
-        if not channels:
-            return
-
+    async def _subscribe(self, channel):
         if self.state != STATE_CONNECTED:
-            logger.debug('skip subscribe to %s until connected', channels)
+            logger.debug('skip subscribe to %s until connected', channel)
             return
 
-        commands = []
+        subscribe = {'channel': channel}
 
-        # private_channels = []
-        # for channel in channels:
-        #     if channel.startswith(self.private_channel_prefix):
-        #         private_channels.append(channel)
-        #
-        # private_data = {}
-        # handler = self._handlers.get("private_sub")
-        # if private_channels and handler:
-        #     data = await handler(**{"client": self.client_id, "channels": private_channels})
-        #     if isinstance(data, dict):
-        #         private_data = data
+        cmd_id = self._next_command_id()
+        command = {
+            'id': cmd_id,
+            'subscribe': subscribe
+        }
+        future = self._register_future(cmd_id, self._timeout)
 
-        for channel in channels:
-            subscribe = {'channel': channel}
-            # if channel in private_data:
-            #     params.update({
-            #         "client": self.client_id,
-            #         "sign": private_data[channel].sign,
-            #         "info": private_data[channel].info
-            #     })
-            # if channel in self._subs:
-            #     params.update({
-            #         "recover": True,
-            #         "last": self._subs[channel].last_message_id
-            #     })
-            commands.append({
-                'id': self._next_command_id(),
-                'subscribe': subscribe
-            })
+        ok = await self._send_commands([command])
+        if not ok:
+            return
 
-        return await self._send_commands(commands)
+        sub = self._subs.get(channel)
+        if not sub:
+            return
 
-    async def _resubscribe(self, sub):
+        reply = await future
+
+        if reply.get('error'):
+            logger.debug("connect reply has error: %s", reply.get('error'))
+            # if self._future:
+            #     self._future.set_result(False)
+            await self._close()
+            handler = sub._events.on_error
+            if handler:
+                await handler(ErrorContext(error=CentrifugeException()))
+        else:
+            subscribe = reply['subscribe']
+            sub._future.set_result(True)
+            handler = sub._events.on_subscribed
+            if handler:
+                recoverable=subscribe.get('recoverable', False)
+                positioned=subscribe.get('positioned', False)
+                stream_position = None
+                if positioned or recoverable:
+                    stream_position = StreamPosition(
+                        offset=subscribe.get('offset', 0),
+                        epoch=subscribe.get('epoch', '')
+                    )
+                await handler(SubscribedContext(
+                    channel=sub.channel,
+                    recoverable=recoverable,
+                    positioned=positioned,
+                    stream_position=stream_position,
+                    was_recovering=subscribe.get('was_recovering', False),
+                    recovered=subscribe.get('recovered', False),
+                    data=subscribe.get('data', None)
+                ))
+            handler = sub._events.on_publication
+            publications = subscribe.get("publications", [])
+            if handler and publications:
+                for pub in publications:
+                    # sub.last_message_id = message.get("uid")
+                    await handler(PublicationContext(
+                        data=pub.get('data')
+                    ))        
+
+    async def _resubscribe(self, sub: 'Subscription'):
         self._subs[sub.channel] = sub
-        asyncio.ensure_future(self._subscribe([sub.channel]))
+        asyncio.ensure_future(self._subscribe(sub.channel))
 
     async def _unsubscribe(self, sub):
         if sub.channel in self._subs:
@@ -626,47 +676,63 @@ class Client:
         except websockets.ConnectionClosed:
             pass
 
-    def _register_future(self, uid, timeout):
+    def _register_future(self, cmd_id: int, timeout: float):
         future = asyncio.Future()
-        self._futures[uid] = future
+        self._futures[cmd_id] = future
 
         if timeout:
             def cb():
                 if not future.done():
                     future.set_exception(Timeout)
-                    del self._futures[uid]
+                    del self._futures[cmd_id]
 
+            print(timeout)
             self._loop.call_later(timeout, cb)
 
         return future
 
-    def _future_error(self, uid, error):
-        future = self._futures.get(uid)
+    def _future_error(self, cmd_id: int, error: Exception):
+        future = self._futures.get(cmd_id)
         if not future:
             return
-        # future.set_exception(CallError(error))
-        del self._futures[uid]
+        future.set_exception(CentrifugeException(error))
+        del self._futures[cmd_id]
 
-    def _future_success(self, uid, result):
-        future = self._futures.get(uid)
+    def _future_success(self, cmd_id: int, reply):
+        future = self._futures.get(cmd_id)
         if not future:
             return
-        future.set_result(result)
-        del self._futures[uid]
+        future.set_result(reply)
+        del self._futures[cmd_id]
 
-    async def _history(self, sub, timeout=None) -> HistoryResult:
+    async def publish(self, channel: str, data: BytesOrJSON, timeout=None) -> PublishResult:
         # if sub.channel not in self._subs:
         #     raise CallError("subscription not in subscribed state")
+        cmd_id = self._next_command_id()
+        command = {
+            'id': cmd_id,
+            'publish': {
+                'channel': channel,
+                'data': data
+            }
+        }
+        future = self._register_future(cmd_id, timeout or self._timeout)
+        await self._send_commands([command])
+        result = await future
+        return result
 
-        uid = uuid.uuid4().hex
-        message = self._get_message("history", {'channel': sub.channel}, uid=uid)
-
-        try:
-            await self._conn.send(json.dumps(message))
-        except websockets.ConnectionClosed:
-            raise ConnectionClosed
-
-        future = self._register_future(uid, timeout or self._timeout)
+    async def history(self, channel: str, timeout=None) -> HistoryResult:
+        # if sub.channel not in self._subs:
+        #     raise CallError("subscription not in subscribed state")
+        cmd_id = self._next_command_id()
+        command = {
+            'id': cmd_id,
+            'history': {
+                'channel': channel
+            }
+        }
+        future = self._register_future(cmd_id, timeout or self._timeout)
+        await self._send_commands([command])
         result = await future
         return result
 
@@ -692,22 +758,6 @@ class Client:
 
         uid = uuid.uuid4().hex
         message = self._get_message("presence_stats", {'channel': sub.channel}, uid=uid)
-
-        try:
-            await self._conn.send(json.dumps(message))
-        except websockets.ConnectionClosed:
-            raise ConnectionClosed
-
-        future = self._register_future(uid, timeout or self._timeout)
-        result = await future
-        return result
-
-    async def _publish(self, sub, data, timeout=None) -> PublishResult:
-        # if sub.channel not in self._subs:
-        #     raise CallError("subscription not in subscribed state")
-
-        uid = uuid.uuid4().hex
-        message = self._get_message("publish", {'channel': sub.channel, 'data': data}, uid=uid)
 
         try:
             await self._conn.send(json.dumps(message))
@@ -768,37 +818,6 @@ class Client:
         if reconnect:
             asyncio.ensure_future(self._schedule_reconnect())
 
-    async def _handle_connect(self, reply):
-        if reply.get('error'):
-            logger.debug("connect reply has error: %s", reply.get('error'))
-            if self._future:
-                self._future.set_result(False)
-            await self._close()
-            handler = self._events.on_error
-            if handler:
-                await handler(ErrorContext(error=CentrifugeException()))
-        else:
-            connect = reply['connect']
-            self.client_id = connect['client']
-            self.state = STATE_CONNECTED
-            self._send_pong = connect.get('pong', False)
-            self._ping_interval = connect.get('ping', 0)
-            if self._ping_interval > 0:
-                self._restart_ping_wait()
-
-            handler = self._events.on_connected
-            if handler:
-                await handler(ConnectedContext(
-                    client=connect.get('client'),
-                    version=connect.get('version', ''),
-                    data=None
-                ))
-            if self._future:
-                self._future.set_result(True)
-
-            channels = self._subs.keys()
-            await self._subscribe(channels)
-
     async def _no_ping(self):
         await self._close()
 
@@ -826,33 +845,6 @@ class Client:
         except websockets.ConnectionClosed:
             await self._close()
             return False
-
-    async def _process_subscribe(self, response):
-        body = response.get("body", {})
-        channel = body.get("channel")
-
-        sub = self._subs.get(channel)
-        if not sub:
-            return
-
-        error = response.get("error")
-        if not error:
-            sub._future.set_result(True)
-            subscribe_handler = sub.handlers.get("subscribe")
-            if subscribe_handler:
-                await subscribe_handler(**{"channel": channel})
-            msg_handler = sub.handlers.get("message")
-            messages = body.get("messages", [])
-            if msg_handler and messages:
-                for message in messages:
-                    sub.last_message_id = message.get("uid")
-                    await msg_handler(**message)
-        else:
-            sub._future.set_exception(SubscriptionError(error))
-            error_handler = sub.handlers.get("error")
-            if error_handler:
-                kw = {"channel": channel, "error": error, "advice": response.get("advice", "")}
-                await error_handler(**kw)
 
     async def _process_message(self, response):
         body = response.get("body")
@@ -924,10 +916,7 @@ class Client:
 
     async def _process_reply(self, reply):
         if reply.get('id', 0) > 0:
-            if reply.get('connect'):
-                await self._handle_connect(reply)
-            else:
-                logger.debug("received unknown reply %s", str(reply))
+            self._future_success(reply['id'], reply)
         elif reply.get('push'):
             logger.debug("received push reply %s", str(reply))
         else:
@@ -988,8 +977,8 @@ class Subscription:
 
     def __init__(
             self,
-            client,
-            channel,
+            client: Client,
+            channel: str,
             # events: Optional[_SubscriptionEventHandler] = None,
             token: str = '',
             get_token: Optional[Callable[..., Awaitable[None]]] = None,
@@ -1040,19 +1029,19 @@ class Subscription:
     async def history(self, timeout=None) -> HistoryResult:
         await self._future
         # noinspection PyProtectedMember
-        return await self._client._history(self, timeout=timeout)
+        return await self._client.history(self.channel, timeout=timeout)
 
     async def presence(self, timeout=None) -> PresenceResult:
         await self._future
         # noinspection PyProtectedMember
-        return await self._client._presence(self, timeout=timeout)
+        return await self._client.presence(self.channel, timeout=timeout)
 
     async def presence_stats(self, timeout=None) -> PresenceStatsResult:
         await self._future
         # noinspection PyProtectedMember
-        return await self._client._presence_stats(self, timeout=timeout)
+        return await self._client.presence_stats(self.channel, timeout=timeout)
 
     async def publish(self, data, timeout=None) -> PublishResult:
         await self._future
         # noinspection PyProtectedMember
-        return await self._client._publish(self, data, timeout=timeout)
+        return await self._client.publish(self.channel, data, timeout=timeout)
