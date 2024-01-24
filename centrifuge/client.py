@@ -366,10 +366,12 @@ class Client:
     Client is a websocket client to Centrifuge/Centrifugo server.
     """
     codec = _JsonCodec
-    factor = 2
-    base_delay = 1
-    max_delay = 60
-    jitter = 0.5
+
+    reconnect_backoff_factor = 2
+    reconnect_backoff_jitter = 0.5
+    # TODO: move to Client options.
+    reconnect_backoff_min_delay = 0.1
+    reconnect_backoff_max_delay = 60
 
     def __init__(
             self,
@@ -425,6 +427,24 @@ class Client:
     def on_error(self, handler: Callable[[ErrorContext], Coroutine[None, None, None]]):
         self._events.on_error = handler
 
+    def on_subscribing(self, handler: Callable[[ServerSubscribingContext], Coroutine[None, None, None]]):
+        self._events.on_subscribing = handler
+
+    def on_subscribed(self, handler: Callable[[ServerSubscribedContext], Coroutine[None, None, None]]):
+        self._events.on_subscribed = handler
+
+    def on_unsubscribed(self, handler: Callable[[ServerUnsubscribedContext], Coroutine[None, None, None]]):
+        self._events.on_unsubscribed = handler
+
+    def on_publication(self, handler: Callable[[ServerPublicationContext], Coroutine[None, None, None]]):
+        self._events.on_publication = handler
+
+    def on_join(self, handler: Callable[[ServerJoinContext], Coroutine[None, None, None]]):
+        self._events.on_join = handler
+
+    def on_leave(self, handler: Callable[[ServerLeaveContext], Coroutine[None, None, None]]):
+        self._events.on_leave = handler
+
     def subscriptions(self) -> Dict[str, 'Subscription']:
         return self._subs.copy()
 
@@ -458,8 +478,8 @@ class Client:
             pass
 
     def _exponential_backoff(self, delay):
-        delay = min(delay * self.factor, self.max_delay)
-        return delay + random.randint(0, int(delay * self.jitter))
+        delay = min(delay * self.reconnect_backoff_factor, self.reconnect_backoff_max_delay)
+        return delay + random.randint(0, int(delay * self.reconnect_backoff_jitter))
 
     async def _schedule_reconnect(self):
         if self.state == STATE_CONNECTED:
@@ -507,7 +527,7 @@ class Client:
         except OSError:
             return False
 
-        self._delay = self.base_delay
+        self._delay = self.reconnect_backoff_min_delay
         connect = {}
         if self._token:
             connect['token'] = self._token
@@ -528,6 +548,8 @@ class Client:
         return success
 
     async def connect(self):
+        if self.state == STATE_CONNECTING:
+            return
         self.state = STATE_CONNECTING
         handler = self._events.on_connecting
         if handler:
@@ -541,12 +563,6 @@ class Client:
 
     async def disconnect(self):
         await self._disconnect('clean disconnect', False)
-
-    # async def subscribe(self, channel, **kwargs):
-    #     sub = Subscription(self, channel, **kwargs)
-    #     self._subs[channel] = sub
-    #     asyncio.ensure_future(self._subscribe([channel]))
-    #     return sub
 
     async def _subscribe(self, channels):
         if not channels:
