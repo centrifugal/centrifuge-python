@@ -1,481 +1,25 @@
 import base64
-import json
-import random
 import asyncio
 import logging
 from enum import Enum
-from typing import Any, Optional, Union, Dict, List
+from typing import Any, Optional, Dict
 from typing import Callable, Awaitable
-from dataclasses import dataclass
 import websockets
-from google.protobuf.json_format import ParseDict
-from google.protobuf.json_format import MessageToDict
-import centrifuge.protocol.client_pb2 as protocol
-from centrifuge.codes import DisconnectedCode, ConnectingCode, UnsubscribedCode, SubscribingCode, ErrorCode
+
+from centrifuge.codecs import _JsonCodec, _ProtobufCodec
+from centrifuge.codes import _DisconnectedCode, _ConnectingCode, _UnsubscribedCode, _SubscribingCode, _ErrorCode
+from centrifuge.contexts import PublicationContext, SubscribedContext, SubscribingContext, UnsubscribedContext, \
+    SubscriptionErrorContext, LeaveContext, JoinContext, SubscriptionTokenContext, DisconnectedContext, \
+    ConnectingContext, ConnectedContext, ErrorContext, ConnectionTokenContext, ServerLeaveContext, ServerJoinContext, \
+    ServerPublicationContext, ServerUnsubscribedContext, ServerSubscribedContext
+from centrifuge.exceptions import ClientDisconnected, ReplyError, CentrifugeException, Unauthorized, \
+    DuplicateSubscription, Timeout
+from centrifuge.handlers import _ConnectionEventHandler, _SubscriptionEventHandler
+from centrifuge.types import StreamPosition, PublishResult, BytesOrJSON, PresenceStatsResult, PresenceResult, \
+    HistoryResult, ClientInfo, RpcResult, Publication
+from centrifuge.utils import _backoff, _code_number, _code_message, _is_token_expired
 
 logger = logging.getLogger('centrifuge')
-
-# JSON type represents objects which may be encoded to JSON.
-JSON = Union[Dict[str, 'JSON'], List['JSON'], str, int, float, bool, None]
-# BytesOrJSON type represents objects which may be encoded to JSON or bytes.
-BytesOrJSON = Union[bytes, JSON]
-
-
-class CentrifugeException(Exception):
-    """
-    CentrifugeException is a base exception for all other exceptions
-    in this library.
-    """
-    pass
-
-
-class ClientDisconnected(CentrifugeException):
-    """
-    ConnectionClosed raised when underlying websocket connection closed.
-    """
-    pass
-
-
-class DuplicateSubscription(CentrifugeException):
-    """
-    DuplicateSubscription raised when trying to create a subscription for a channel which
-    already has subscription in Client's internal subscription registry. Centrifuge/Centrifugo
-    server does not allow subscribing on the same channel twice for the same Client.
-    """
-    pass
-
-
-class SubscriptionUnsubscribed(CentrifugeException):
-    """
-    SubscriptionUnsubscribedError raised when an error subscribing on channel occurred.
-    """
-    pass
-
-
-class Timeout(CentrifugeException):
-    """
-    Timeout raised every time operation times out.
-    """
-    pass
-
-
-class ReplyError(CentrifugeException):
-    """
-    ReplyError raised when an error returned from server as result of presence/history/publish call.
-    """
-    def __init__(self, code: int, message: str, temporary: bool):
-        self.code = code
-        self.message = message
-        self.temporary = temporary
-        super().__init__(f"Error {code}: {message} (temporary: {temporary})")
-
-
-class Unauthorized(CentrifugeException):
-    """
-    Unauthorized may be raised from user's get_token functions to indicate
-    client is not able to connect or subscribe.
-    """
-    pass
-
-
-class _JsonCodec:
-    """
-    _JsonCodec is a default codec for Centrifuge library. It encodes commands using JSON.
-    """
-
-    @staticmethod
-    def encode_commands(commands):
-        return '\n'.join(json.dumps(command) for command in commands)
-
-    @staticmethod
-    def decode_replies(data):
-        return [json.loads(reply) for reply in data.strip().split('\n')]
-
-
-class _ProtobufCodec:
-    """
-    _ProtobufCodec encodes commands using Protobuf protocol.
-    """
-
-    @staticmethod
-    def encode_commands(commands):
-        serialized_commands = []
-        for command in commands:
-            # noinspection PyUnresolvedReferences
-            serialized = ParseDict(command, protocol.Command()).SerializeToString()
-            serialized_commands.append(_varint_encode(len(serialized)) + serialized)
-        return b''.join(serialized_commands)
-
-    @staticmethod
-    def decode_replies(data):
-        replies = []
-        position = 0
-        while position < len(data):
-            message_length, position = _varint_decode(data, position)
-            message_end = position + message_length
-            message_bytes = data[position:message_end]
-            position = message_end
-            # noinspection PyUnresolvedReferences
-            reply = protocol.Reply()
-            reply.ParseFromString(message_bytes)
-            replies.append(MessageToDict(reply, preserving_proto_field_name=True))
-        return replies
-
-
-def _varint_encode(number):
-    """Encode an integer as a varint."""
-    buffer = []
-    while True:
-        towrite = number & 0x7f
-        number >>= 7
-        if number:
-            buffer.append(towrite | 0x80)
-        else:
-            buffer.append(towrite)
-            break
-    return bytes(buffer)
-
-
-def _varint_decode(buffer, position):
-    """Decode a varint from buffer starting at position."""
-    result = 0
-    shift = 0
-    while True:
-        byte = buffer[position]
-        position += 1
-        result |= (byte & 0x7f) << shift
-        shift += 7
-        if not byte & 0x80:
-            break
-    return result, position
-
-
-def _backoff(step: int, min_value: float, max_value: float):
-    """
-    Implements exponential backoff with jitter.
-    Using full jitter technique - see https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
-    """
-    if step > 31:
-        step = 31
-    interval = random.uniform(0, min(max_value, min_value * 2 ** step))
-    return min(max_value, min_value + interval)
-
-
-def _code_message(code: Enum):
-    return str(code.name).lower().replace("_", " ")
-
-
-def _code_number(code: Enum):
-    return int(code.value)
-
-
-@dataclass
-class StreamPosition:
-    """
-    StreamPosition represents a position in stream.
-    """
-    offset: int
-    epoch: str
-
-
-@dataclass
-class ClientInfo:
-    """
-    ClientInfo represents information about client connection.
-
-    Attributes:
-        client: client ID.
-        user: user ID.
-        conn_info: optional connection information (i.e. may be None).
-        chan_info: optional channel information (i.e. may be None).
-    """
-    client: str
-    user: str
-    conn_info: Optional[BytesOrJSON]
-    chan_info: Optional[BytesOrJSON]
-
-
-@dataclass
-class ConnectedContext:
-    """
-    ConnectedContext is a context passed to on_connected callback.
-
-    Attributes:
-        client: client ID.
-        version: server version.
-        data: optional data returned from server on connect (i.e. can be None).
-    """
-
-    client: str
-    version: str
-    data: Optional[BytesOrJSON]
-
-
-@dataclass
-class ConnectingContext:
-    """
-    ConnectingContext is a context passed to on_connecting callback.
-
-    Attributes:
-        code: code of state transition.
-        reason: reason of state transition.
-    """
-
-    code: int
-    reason: str
-
-
-@dataclass
-class DisconnectedContext:
-    """
-    DisconnectedContext is a context passed to on_disconnected callback.
-
-    Attributes:
-        code: code of state transition.
-        reason: reason of state transition.
-    """
-    code: int
-    reason: str
-
-
-@dataclass
-class ErrorContext:
-    """ErrorContext is a context passed to on_error callback."""
-
-    code: int
-    error: Exception
-
-
-@dataclass
-class ServerSubscribingContext:
-    """ServerSubscribingContext is a context passed to on_subscribing callback for server-side subscriptions."""
-    channel: str
-
-
-@dataclass
-class ServerSubscribedContext:
-    """ServerSubscribedContext is a context passed to on_subscribed callback for server-side subscriptions."""
-    channel: str
-
-
-@dataclass
-class ServerUnsubscribedContext:
-    """ServerUnsubscribedContext is a context passed to on_unsubscribed callback for server-side subscriptions."""
-    channel: str
-
-
-@dataclass
-class ServerPublicationContext:
-    """
-    ServerPublicationContext is a context passed to on_publication callback for server-side subscriptions.
-
-    Attributes:
-        channel: channel from which publication received.
-        offset: publication offset in stream.
-        data: publication data.
-        info: optional client info [i.e. may be None].
-    """
-
-    channel: str
-    offset: int
-    data: BytesOrJSON
-    info: Optional[ClientInfo]
-
-
-@dataclass
-class ServerJoinContext:
-    """ServerJoinContext is a context passed to on_join callback for server-side subscriptions."""
-    channel: str
-    info: ClientInfo
-
-
-@dataclass
-class ServerLeaveContext:
-    """ServerLeaveContext is a context passed to on_leave callback for server-side subscriptions."""
-    channel: str
-    info: ClientInfo
-
-
-@dataclass
-class SubscribingContext:
-    """SubscribingContext is a context passed to on_subscribing callback."""
-    code: int
-    reason: str
-
-
-@dataclass
-class SubscribedContext:
-    """SubscribedContext is a context passed to on_subscribed callback."""
-    channel: str
-    recoverable: bool
-    positioned: bool
-    stream_position: Optional[StreamPosition]
-    was_recovering: bool
-    recovered: bool
-    data: Optional[BytesOrJSON]
-
-
-@dataclass
-class UnsubscribedContext:
-    """UnsubscribedContext is a context passed to on_unsubscribed callback."""
-    code: int
-    reason: str
-
-
-@dataclass
-class PublicationContext:
-    """PublicationContext is a context passed to on_publication callback."""
-    offset: int
-    data: BytesOrJSON
-    info: Optional[ClientInfo]
-
-
-@dataclass
-class JoinContext:
-    """JoinContext is a context passed to on_join callback."""
-    info: ClientInfo
-
-
-@dataclass
-class LeaveContext:
-    """LeaveContext is a context passed to on_leave callback."""
-    info: ClientInfo
-
-
-@dataclass
-class SubscriptionErrorContext:
-    """SubscriptionErrorContext is a context passed to on_error callback of subscription."""
-    code: int
-    error: Exception
-
-
-@dataclass
-class ConnectionTokenContext:
-    """ConnectionTokenContext is a context passed to get_token callback of connection."""
-    pass
-
-
-@dataclass
-class SubscriptionTokenContext:
-    """SubscriptionTokenContext is a context passed to get_token callback of subscription."""
-    channel: str
-
-
-@dataclass
-class PublishResult:
-    """PublishResult is a result of publish operation."""
-    pass
-
-
-@dataclass
-class RpcResult:
-    """RpcResult is a result of RPC operation."""
-    data: BytesOrJSON
-
-
-@dataclass
-class PresenceResult:
-    """PresenceResult is a result of presence operation."""
-    clients: Dict[str, ClientInfo]
-
-
-@dataclass
-class PresenceStatsResult:
-    """PresenceStatsResult is a result of presence stats operation."""
-    num_clients: int
-    num_users: int
-
-
-@dataclass
-class HistoryResult:
-    """HistoryResult is a result of history operation."""
-    publications: List[PublicationContext]
-    offset: int
-    epoch: str
-
-
-@dataclass
-class HistoryOptions:
-    """HistoryOptions is a set of options to use in history operation."""
-    limit: Optional[int]
-    since: Optional[StreamPosition]
-    reverse: Optional[bool]
-
-
-class _ConnectionEventHandler:
-    """_ConnectionEventHandler is a set of callbacks called on various client events."""
-    async def on_connecting(self, ctx: ConnectingContext):
-        """Called when connecting. This may be initial connecting, or
-        temporary loss of connection with automatic reconnect"""
-        pass
-
-    async def on_connected(self,  ctx: ConnectedContext):
-        """Called when connected."""
-        pass
-
-    async def on_disconnected(self, ctx: DisconnectedContext):
-        """Called when disconnected."""
-        pass
-
-    async def on_error(self, ctx: ErrorContext):
-        """Called when there's an error."""
-        pass
-
-    async def on_subscribed(self, ctx: ServerSubscribedContext):
-        """Called when subscribed on server-side subscription."""
-        pass
-
-    async def on_subscribing(self, ctx: ServerSubscribingContext):
-        """Called when subscribing to server-side subscription."""
-        pass
-
-    async def on_unsubscribed(self, ctx: ServerUnsubscribedContext):
-        """Called when unsubscribed from server-side subscription."""
-        pass
-
-    async def on_publication(self, ctx: ServerPublicationContext):
-        """Called when there's a publication coming from a server-side subscription."""
-        pass
-
-    async def on_join(self, ctx: ServerJoinContext):
-        """Called when some client joined channel in server-side subscription."""
-        pass
-
-    async def on_leave(self, ctx: ServerLeaveContext):
-        """Called when some client left channel in server-side subscription."""
-        pass
-
-
-class _SubscriptionEventHandler:
-    """_SubscriptionEventHandler is a set of callbacks called on various subscription events."""
-    async def on_subscribing(self, ctx: SubscribingContext):
-        """Called when subscribing. This may be initial subscribing attempt,
-        or temporary loss with automatic resubscribe"""
-        pass
-
-    async def on_subscribed(self, ctx: SubscribedContext):
-        """Called when subscribed."""
-        pass
-
-    async def on_unsubscribed(self, ctx: UnsubscribedContext):
-        """Called when unsubscribed. No auto re-subscribing will happen after this"""
-        pass
-
-    async def on_publication(self, ctx: PublicationContext):
-        """Called when there's a publication coming from a channel"""
-        pass
-
-    async def on_join(self, ctx: JoinContext):
-        """Called when some client joined channel (join/leave must be enabled on server side)."""
-        pass
-
-    async def on_leave(self, ctx: LeaveContext):
-        """Called when some client left channel (join/leave must be enabled on server side)"""
-        pass
-
-    async def on_error(self, ctx: SubscriptionErrorContext):
-        """Called when various subscription async errors happen. In most cases this is only for logging purposes"""
-        pass
 
 
 class ClientState(Enum):
@@ -487,8 +31,13 @@ class ClientState(Enum):
     CONNECTED = 'connected'
 
 
-def _is_token_expired(code: int):
-    return code == ErrorCode.TOKEN_EXPIRED.value
+class SubscriptionState(Enum):
+    """
+    SubscriptionState represents possible states of subscription.
+    """
+    UNSUBSCRIBED = 'unsubscribed'
+    SUBSCRIBING = 'subscribing'
+    SUBSCRIBED = 'subscribed'
 
 
 class Client:
@@ -669,7 +218,7 @@ class Client:
             self._conn = await websockets.connect(self._address, subprotocols=subprotocols)
         except OSError as e:
             handler = self._events.on_error
-            await handler(ErrorContext(code=_code_number(ErrorCode.TRANSPORT_CLOSED), error=e))
+            await handler(ErrorContext(code=_code_number(_ErrorCode.TRANSPORT_CLOSED), error=e))
             asyncio.ensure_future(self._schedule_reconnect())
             return False
 
@@ -683,12 +232,12 @@ class Client:
                 token = await self._get_token(ConnectionTokenContext())
             except Exception as e:
                 if isinstance(e, Unauthorized):
-                    code = DisconnectedCode.UNAUTHORIZED
+                    code = _DisconnectedCode.UNAUTHORIZED
                     await self._disconnect(_code_number(code), _code_message(code), False)
                     return False
                 await self._close_transport_conn()
                 handler = self._events.on_error
-                await handler(ErrorContext(code=_code_number(ErrorCode.CLIENT_CONNECT_TOKEN), error=e))
+                await handler(ErrorContext(code=_code_number(_ErrorCode.CLIENT_CONNECT_TOKEN), error=e))
                 asyncio.ensure_future(self._schedule_reconnect())
                 return False
 
@@ -718,7 +267,7 @@ class Client:
         except Timeout as e:
             await self._close_transport_conn()
             handler = self._events.on_error
-            await handler(ErrorContext(code=_code_number(ErrorCode.TIMEOUT), error=e))
+            await handler(ErrorContext(code=_code_number(_ErrorCode.TIMEOUT), error=e))
             await self._schedule_reconnect()
             return False
         except Exception as e:
@@ -728,7 +277,7 @@ class Client:
             await self._close_transport_conn()
             handler = self._events.on_error
             # TODO: think on better error code here.
-            await handler(ErrorContext(code=_code_number(ErrorCode.TRANSPORT_CLOSED), error=e))
+            await handler(ErrorContext(code=_code_number(_ErrorCode.TRANSPORT_CLOSED), error=e))
             await self._schedule_reconnect()
             return False
 
@@ -744,7 +293,7 @@ class Client:
             if temporary:
                 await self._close_transport_conn()
                 handler = self._events.on_error
-                await handler(ErrorContext(code=_code_number(ErrorCode.CONNECT_REPLY_ERROR),
+                await handler(ErrorContext(code=_code_number(_ErrorCode.CONNECT_REPLY_ERROR),
                                            error=ReplyError(code, message, temporary)))
                 await self._schedule_reconnect()
                 return False
@@ -789,7 +338,7 @@ class Client:
         self.state = ClientState.CONNECTING
 
         handler = self._events.on_connecting
-        code = ConnectingCode.CONNECT_CALLED
+        code = _ConnectingCode.CONNECT_CALLED
         await handler(ConnectingContext(code=_code_number(code), reason=_code_message(code)))
         await self._create_connection()
 
@@ -800,7 +349,7 @@ class Client:
         if self.state == ClientState.DISCONNECTED:
             return
 
-        code = DisconnectedCode.DISCONNECT_CALLED
+        code = _DisconnectedCode.DISCONNECT_CALLED
         await self._disconnect(_code_number(code), _code_message(code), False)
 
     @staticmethod
@@ -828,12 +377,12 @@ class Client:
                 token = await sub._get_token(SubscriptionTokenContext(channel=channel))
             except Exception as e:
                 if isinstance(e, Unauthorized):
-                    code = UnsubscribedCode.UNAUTHORIZED
+                    code = _UnsubscribedCode.UNAUTHORIZED
                     await sub._move_unsubscribed(_code_number(code), _code_message(code))
                     return False
                 handler = sub._events.on_error
                 await handler(
-                    SubscriptionErrorContext(code=_code_number(ErrorCode.SUBSCRIPTION_SUBSCRIBE_TOKEN), error=e))
+                    SubscriptionErrorContext(code=_code_number(_ErrorCode.SUBSCRIPTION_SUBSCRIBE_TOKEN), error=e))
                 asyncio.ensure_future(sub._schedule_resubscribe())
                 return False
 
@@ -857,7 +406,7 @@ class Client:
             if sub.state != SubscriptionState.SUBSCRIBING:
                 return
             handler = sub._events.on_error
-            await handler(SubscriptionErrorContext(code=_code_number(ErrorCode.TIMEOUT), error=e))
+            await handler(SubscriptionErrorContext(code=_code_number(_ErrorCode.TIMEOUT), error=e))
             await sub._schedule_resubscribe()
             return
         except Exception as e:
@@ -866,7 +415,7 @@ class Client:
                 return
             handler = sub._events.on_error
             # TODO: think on better error code here.
-            await handler(SubscriptionErrorContext(code=_code_number(ErrorCode.TRANSPORT_CLOSED), error=e))
+            await handler(SubscriptionErrorContext(code=_code_number(_ErrorCode.TRANSPORT_CLOSED), error=e))
             await sub._schedule_resubscribe()
             return
 
@@ -882,7 +431,7 @@ class Client:
             if temporary:
                 handler = sub._events.on_error
                 await handler(SubscriptionErrorContext(
-                    code=_code_number(ErrorCode.SUBSCRIBE_REPLY_ERROR),
+                    code=_code_number(_ErrorCode.SUBSCRIBE_REPLY_ERROR),
                     error=ReplyError(code, message, temporary)))
                 # noinspection PyProtectedMember
                 await sub._schedule_resubscribe()
@@ -918,7 +467,7 @@ class Client:
         try:
             await future
         except Timeout:
-            code = ConnectingCode.UNSUBSCRIBE_ERROR
+            code = _ConnectingCode.UNSUBSCRIBE_ERROR
             await self._disconnect(_code_number(code), _code_message(code), True)
             return
 
@@ -1109,7 +658,7 @@ class Client:
             sub._future = asyncio.Future()
             if sub.state == SubscriptionState.SUBSCRIBED:
                 handler = sub._events.on_subscribing
-                code = SubscribingCode.TRANSPORT_CLOSED
+                code = _SubscribingCode.TRANSPORT_CLOSED
                 await handler(SubscribingContext(code=_code_number(code), reason=_code_message(code)))
 
         handler = self._events.on_disconnected
@@ -1120,7 +669,7 @@ class Client:
             asyncio.ensure_future(self._schedule_reconnect())
 
     async def _no_ping(self):
-        code = ConnectingCode.NO_PING
+        code = _ConnectingCode.NO_PING
         await self._disconnect(_code_number(code), _code_message(code), True)
 
     def _restart_ping_wait(self):
@@ -1145,7 +694,7 @@ class Client:
             await self._conn.send(commands)
             return True
         except websockets.ConnectionClosed:
-            code = ConnectingCode.TRANSPORT_CLOSED
+            code = _ConnectingCode.TRANSPORT_CLOSED
             await self._disconnect(_code_number(code), _code_message(code), True)
             return False
 
@@ -1182,6 +731,8 @@ class Client:
                 await self._process_unsubscribe(push['channel'], push['unsubscribe'])
             elif 'disconnect' in push:
                 await self._process_disconnect(push['disconnect'])
+            else:
+                logger.debug("skip unknown push reply %s", str(reply))
         else:
             await self._handle_ping()
 
@@ -1194,9 +745,11 @@ class Client:
         client_info = self._extract_client_info(info) if info else None
 
         await sub._events.on_publication(PublicationContext(
-            offset=pub.get('offset', 0),
-            data=self._decode_data(pub.get('data')),
-            info=client_info
+            pub=Publication(
+                offset=pub.get('offset', 0),
+                data=self._decode_data(pub.get('data')),
+                info=client_info
+            )
         ))
 
     async def _process_join(self, channel: str, join: Any):
@@ -1256,14 +809,14 @@ class Client:
         ws_reason = self._conn.close_reason
         logger.debug("connection closed, code: %d, reason: %s", ws_code, ws_reason)
 
-        default_code = ConnectingCode.TRANSPORT_CLOSED
+        default_code = _ConnectingCode.TRANSPORT_CLOSED
         disconnect_code = _code_number(default_code)
         disconnect_reason = _code_message(default_code)
         reconnect = True
 
         if ws_code < 3000:
             if ws_code == 1009:
-                code = DisconnectedCode.MESSAGE_SIZE_LIMIT
+                code = _DisconnectedCode.MESSAGE_SIZE_LIMIT
                 disconnect_code = _code_number(code)
                 disconnect_reason = _code_message(code)
         else:
@@ -1273,15 +826,6 @@ class Client:
                 reconnect = False
 
         await self._disconnect(disconnect_code, disconnect_reason, reconnect)
-
-
-class SubscriptionState(Enum):
-    """
-    SubscriptionState represents possible states of subscription.
-    """
-    UNSUBSCRIBED = 'unsubscribed'
-    SUBSCRIBING = 'subscribing'
-    SUBSCRIBED = 'subscribed'
 
 
 class Subscription:
@@ -1366,7 +910,7 @@ class Subscription:
         self.state = SubscriptionState.SUBSCRIBING
 
         handler = self._events.on_subscribing
-        code = SubscribingCode.SUBSCRIBE_CALLED
+        code = _SubscribingCode.SUBSCRIBE_CALLED
         await handler(SubscribingContext(code=_code_number(code), reason=_code_message(code)))
 
         # noinspection PyProtectedMember
@@ -1378,7 +922,7 @@ class Subscription:
         self.state = SubscriptionState.UNSUBSCRIBED
 
         handler = self._events.on_unsubscribed
-        code = UnsubscribedCode.UNSUBSCRIBE_CALLED
+        code = _UnsubscribedCode.UNSUBSCRIBE_CALLED
         await handler(UnsubscribedContext(code=_code_number(code), reason=_code_message(code)))
 
         # noinspection PyProtectedMember
@@ -1456,9 +1000,11 @@ class Subscription:
                 info = pub.get('info', None)
                 client_info = self._client._extract_client_info(info) if info else None
                 await handler(PublicationContext(
-                    offset=pub.get('offset', 0),
-                    data=self._client._decode_data(pub.get('data')),
-                    info=client_info,
+                    pub=Publication(
+                        offset=pub.get('offset', 0),
+                        data=self._client._decode_data(pub.get('data')),
+                        info=client_info
+                    )
                 ))
 
         self._resubscribe_attempts = 0

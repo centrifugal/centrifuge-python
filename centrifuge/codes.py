@@ -1,7 +1,7 @@
 from enum import Enum
 
 
-class ConnectingCode(Enum):
+class _ConnectingCode(Enum):
     """
     Known client side codes for connection moving to connecting state.
     In most cases just for logging purposes.
@@ -13,7 +13,7 @@ class ConnectingCode(Enum):
     UNSUBSCRIBE_ERROR = 4
 
 
-class DisconnectedCode(Enum):
+class _DisconnectedCode(Enum):
     """
     Known client side codes for connection moving to disconnected state.
     In most cases just for logging purposes.
@@ -24,7 +24,7 @@ class DisconnectedCode(Enum):
     MESSAGE_SIZE_LIMIT = 3
 
 
-class SubscribingCode(Enum):
+class _SubscribingCode(Enum):
     """
     Known client side codes for subscription moving to subscribing state.
     In most cases just for logging purposes.
@@ -33,7 +33,7 @@ class SubscribingCode(Enum):
     TRANSPORT_CLOSED = 1
 
 
-class UnsubscribedCode(Enum):
+class _UnsubscribedCode(Enum):
     """
     Known client side codes for subscription moving to unsubscribed state.
     In most cases just for logging purposes.
@@ -43,7 +43,7 @@ class UnsubscribedCode(Enum):
     CLIENT_CLOSED = 2
 
 
-class ErrorCode(Enum):
+class _ErrorCode(Enum):
     """
     Known client side codes for error event.
     In most cases just for logging purposes.

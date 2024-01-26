@@ -45,7 +45,7 @@ async def unsubscribed_handler(ctx: UnsubscribedContext):
 
 
 async def publication_handler(ctx: PublicationContext):
-    logging.info("publication: %s", ctx.data)
+    logging.info("publication: %s", ctx.pub.data)
 
 
 async def join_handler(ctx: JoinContext):
