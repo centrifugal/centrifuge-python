@@ -1,11 +1,10 @@
 import asyncio
-import json
 import signal
 
 from centrifuge import Client, ConnectedContext, ConnectingContext, DisconnectedContext, \
-    ErrorContext, SubscriptionErrorContext, LeaveContext, JoinContext, PublicationContext,\
+    ErrorContext, SubscriptionErrorContext, LeaveContext, JoinContext, PublicationContext, \
     UnsubscribedContext, SubscribedContext, SubscribingContext, ConnectionTokenContext, \
-    SubscriptionTokenContext
+    SubscriptionTokenContext, CentrifugeException
 
 # Configure logging.
 import logging
@@ -64,79 +63,81 @@ async def subscription_error_handler(ctx: SubscriptionErrorContext):
 async def get_token(ctx: ConnectionTokenContext) -> str:
     # To reject connection raise centrifuge.Unauthorized() exception:
     # raise centrifuge.Unauthorized()
+
     logging.info("get connection token called: %s", ctx)
+
     # REPLACE with your own logic to get token from the backend!
-    return 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsImV4cCI6MTcwNjU0NTA0MCwiaWF0IjoxNzA1OTQwMjQwfQ.' \
-           'HQyladwnFFjkxkZ7L4bYteUmWTxCgh5wbx8qcnIQfAU'
+    example_token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsImV4cCI6Nzc1NDI2MTQwOSwiaWF0IjoxNzA2MjYx' \
+                    'NDA5fQ.9jQEr9XqAW1BY9oolmawhtLRx1ZLJZS6ivgYznuf4-Y'
+    return example_token
 
 
 async def get_subscription_token(ctx: SubscriptionTokenContext) -> str:
     # To reject subscription raise centrifuge.Unauthorized() exception:
     # raise centrifuge.Unauthorized()
+
     logging.info("get subscription token called: %s", ctx)
-    # REPLACE with your own logic to get subscription token from the backend!
-    return 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsImV4cCI6Nzc1NDI1MjQyNywiaWF0IjoxNzA2MjUyNDI3LC' \
-           'JjaGFubmVsIjoiY2hhbm5lbCJ9.Lw9xbEa37sRBonLmRecC4b1yBJedbbr6rues7qlCXcA'
+
+    # REPLACE with your own logic to get token from the backend!
+    example_token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsImV4cCI6Nzc1NDI2MTM4MCwiaWF0IjoxNzA2MjYx' \
+                    'MzgwLCJjaGFubmVsIjoiY2hhbm5lbCJ9.yCgJP4N7uBCRZL9sppStO4F5NBqYsp9E6mkmLXF-1dI'
+    return example_token
 
 
-async def shutdown(received_signal, current_loop, cf_client: Client):
-    logging.info(f"Received exit signal {received_signal.name}...")
-    await cf_client.disconnect()
-
-    tasks = [t for t in asyncio.all_tasks() if t is not
-             asyncio.current_task()]
-
-    for task in tasks:
-        task.cancel()
-
-    logging.info("Cancelling outstanding tasks")
-    await asyncio.gather(*tasks, return_exceptions=True)
-    current_loop.stop()
-
-
-async def run():
-    asyncio.ensure_future(client.connect())
-    asyncio.ensure_future(sub.subscribe())
-    await asyncio.sleep(1)
-    # result = await sub.publish(data=json.dumps({"input": "test"}).encode()) 
-    result = await sub.publish(data={"input": "test"}) 
-    print(result)
-
-
-if __name__ == '__main__':
+def run_example():
     client = Client(
         'ws://localhost:8000/connection/websocket',
-        # REPLACE with your own!
-        # token='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsImV4cCI6MTcwNjU0NTA0MCwiaWF0IjoxNzA1OTQwMjQwfQ.'
-        #       'HQyladwnFFjkxkZ7L4bYteUmWTxCgh5wbx8qcnIQfAU',
         get_token=get_token,
-        use_protobuf=True,
+        use_protobuf=False,
     )
-
     client.on_connecting(connecting_handler)
     client.on_connected(connected_handler)
     client.on_disconnected(disconnected_handler)
     client.on_error(error_handler)
 
-    sub = client.new_subscription(
-        'channel',
-        get_token=get_subscription_token,
-    )
+    sub = client.new_subscription('channel', get_token=get_subscription_token)
     sub.on_subscribing(subscribing_handler)
     sub.on_subscribed(subscribed_handler)
     sub.on_unsubscribed(unsubscribed_handler)
     sub.on_publication(publication_handler)
 
-    asyncio.ensure_future(run())
+    async def publish():
+        try:
+            # Note that in Protobuf case we need to encode payloads to bytes:
+            # result = await sub.publish(data=json.dumps({"input": "test"}).encode())
+            # But in JSON protocol case we can just pass dict which will be encoded to JSON automatically.
+            await sub.publish(data={"input": "test"})
+        except CentrifugeException as e:
+            logging.error("error publish: %s", e)
+
+    asyncio.ensure_future(client.connect())
+    asyncio.ensure_future(sub.subscribe())
+    asyncio.ensure_future(publish())
 
     loop = asyncio.get_event_loop()
 
+    async def shutdown(received_signal):
+        logging.info(f"Received exit signal {received_signal.name}...")
+        await client.disconnect()
+
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+
+        logging.info("Cancelling outstanding tasks")
+        await asyncio.gather(*tasks, return_exceptions=True)
+        loop.stop()
+
     signals = (signal.SIGTERM, signal.SIGINT)
     for s in signals:
-        loop.add_signal_handler(s, lambda ts=s: asyncio.create_task(shutdown(ts, loop, client)))
+        loop.add_signal_handler(s, lambda received_signal=s: asyncio.create_task(shutdown(received_signal)))
 
     try:
         loop.run_forever()
     finally:
         loop.close()
         logging.info("successfully completed service shutdown")
+
+
+if __name__ == '__main__':
+    run_example()
