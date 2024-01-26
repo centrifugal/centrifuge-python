@@ -2,9 +2,10 @@ import asyncio
 import json
 import signal
 
-from centrifuge import Client, \
-    ConnectedContext, ConnectingContext, DisconnectedContext, ErrorContext, SubscriptionErrorContext, LeaveContext, \
-    JoinContext, PublicationContext, UnsubscribedContext, SubscribedContext, SubscribingContext
+from centrifuge import Client, ConnectedContext, ConnectingContext, DisconnectedContext, \
+    ErrorContext, SubscriptionErrorContext, LeaveContext, JoinContext, PublicationContext,\
+    UnsubscribedContext, SubscribedContext, SubscribingContext, ConnectionTokenContext, \
+    SubscriptionTokenContext
 
 # Configure logging.
 import logging
@@ -12,7 +13,6 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-
 cf_logger = logging.getLogger('centrifuge')
 cf_logger.setLevel(logging.DEBUG)
 
@@ -30,7 +30,7 @@ async def disconnected_handler(ctx: DisconnectedContext):
 
 
 async def error_handler(ctx: ErrorContext):
-    logging.error("client error: %s", ctx.error)
+    logging.error("client error: %s", ctx)
 
 
 async def subscribing_handler(ctx: SubscribingContext):
@@ -61,10 +61,22 @@ async def subscription_error_handler(ctx: SubscriptionErrorContext):
     logging.info("subscription error: %s", ctx)
 
 
-async def get_token():
+async def get_token(ctx: ConnectionTokenContext) -> str:
+    # To reject connection raise centrifuge.Unauthorized() exception:
+    # raise centrifuge.Unauthorized()
+    logging.info("get connection token called: %s", ctx)
     # REPLACE with your own logic to get token from the backend!
     return 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsImV4cCI6MTcwNjU0NTA0MCwiaWF0IjoxNzA1OTQwMjQwfQ.' \
            'HQyladwnFFjkxkZ7L4bYteUmWTxCgh5wbx8qcnIQfAU'
+
+
+async def get_subscription_token(ctx: SubscriptionTokenContext) -> str:
+    # To reject subscription raise centrifuge.Unauthorized() exception:
+    # raise centrifuge.Unauthorized()
+    logging.info("get subscription token called: %s", ctx)
+    # REPLACE with your own logic to get subscription token from the backend!
+    return 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsImV4cCI6Nzc1NDI1MjQyNywiaWF0IjoxNzA2MjUyNDI3LC' \
+           'JjaGFubmVsIjoiY2hhbm5lbCJ9.Lw9xbEa37sRBonLmRecC4b1yBJedbbr6rues7qlCXcA'
 
 
 async def shutdown(received_signal, current_loop, cf_client: Client):
@@ -95,10 +107,10 @@ if __name__ == '__main__':
     client = Client(
         'ws://localhost:8000/connection/websocket',
         # REPLACE with your own!
-        token='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsImV4cCI6MTcwNjU0NTA0MCwiaWF0IjoxNzA1OTQwMjQwfQ.'
-              'HQyladwnFFjkxkZ7L4bYteUmWTxCgh5wbx8qcnIQfAU',
-        # get_token=get_token,
-        use_protobuf=False,
+        # token='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsImV4cCI6MTcwNjU0NTA0MCwiaWF0IjoxNzA1OTQwMjQwfQ.'
+        #       'HQyladwnFFjkxkZ7L4bYteUmWTxCgh5wbx8qcnIQfAU',
+        get_token=get_token,
+        use_protobuf=True,
     )
 
     client.on_connecting(connecting_handler)
@@ -106,7 +118,10 @@ if __name__ == '__main__':
     client.on_disconnected(disconnected_handler)
     client.on_error(error_handler)
 
-    sub = client.new_subscription('channel')
+    sub = client.new_subscription(
+        'channel',
+        get_token=get_subscription_token,
+    )
     sub.on_subscribing(subscribing_handler)
     sub.on_subscribed(subscribed_handler)
     sub.on_unsubscribed(unsubscribed_handler)

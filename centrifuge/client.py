@@ -4,14 +4,14 @@ import random
 import asyncio
 import logging
 from enum import Enum
-from typing import Any, Optional, Union, Dict, List, Coroutine
+from typing import Any, Optional, Union, Dict, List
 from typing import Callable, Awaitable
 from dataclasses import dataclass
 import websockets
 from google.protobuf.json_format import ParseDict
 from google.protobuf.json_format import MessageToDict
 import centrifuge.protocol.client_pb2 as protocol
-from centrifuge.codes import DisconnectedCode, ConnectingCode, UnsubscribedCode, SubscribingCode
+from centrifuge.codes import DisconnectedCode, ConnectingCode, UnsubscribedCode, SubscribingCode, ErrorCode
 
 logger = logging.getLogger('centrifuge')
 
@@ -37,6 +37,11 @@ class ClientDisconnected(CentrifugeException):
 
 
 class DuplicateSubscription(CentrifugeException):
+    """
+    DuplicateSubscription raised when trying to create a subscription for a channel which
+    already has subscription in Client's internal subscription registry. Centrifuge/Centrfugo
+    server does not allow subscribing on the same channel twice for the same Client.
+    """
     pass
 
 
@@ -236,6 +241,8 @@ class DisconnectedContext:
 @dataclass
 class ErrorContext:
     """ErrorContext is a context passed to on_error callback."""
+
+    code: int
     error: Exception
 
 
@@ -328,7 +335,20 @@ class LeaveContext:
 @dataclass
 class SubscriptionErrorContext:
     """SubscriptionErrorContext is a context passed to on_error callback of subscription."""
+    code: int
     error: Exception
+
+
+@dataclass
+class ConnectionTokenContext:
+    """ConnectionTokenContext is a context passed to get_token callback of connection."""
+    pass
+
+
+@dataclass
+class SubscriptionTokenContext:
+    """SubscriptionTokenContext is a context passed to get_token callback of subscription."""
+    channel: str
 
 
 @dataclass
@@ -468,7 +488,7 @@ class Client:
             self,
             address,
             token: str = '',
-            get_token: Optional[Callable[..., Awaitable[None]]] = None,
+            get_token: Optional[Callable[[ConnectionTokenContext], Awaitable[str]]] = None,
             use_protobuf: bool = False,
             timeout: float = 5.0,
             max_server_ping_delay: float = 10.0,
@@ -507,43 +527,43 @@ class Client:
         self._futures = {}
         self._reconnect_attempts = 0
 
-    def on_connecting(self, handler: Callable[[ConnectingContext], Coroutine[None, None, None]]):
+    def on_connecting(self, handler: Callable[[ConnectingContext], Awaitable[None]]):
         """Allows setting a callback for connecting event."""
         self._events.on_connecting = handler
 
-    def on_connected(self, handler: Callable[[ConnectedContext], Coroutine[None, None, None]]):
+    def on_connected(self, handler: Callable[[ConnectedContext], Awaitable[None]]):
         """Allows setting a callback for connected event."""
         self._events.on_connected = handler
 
-    def on_disconnected(self, handler: Callable[[DisconnectedContext], Coroutine[None, None, None]]):
+    def on_disconnected(self, handler: Callable[[DisconnectedContext], Awaitable[None]]):
         """Allows setting a callback for disconnected event."""
         self._events.on_disconnected = handler
 
-    def on_error(self, handler: Callable[[ErrorContext], Coroutine[None, None, None]]):
+    def on_error(self, handler: Callable[[ErrorContext], Awaitable[None]]):
         """Allows setting a callback for error event."""
         self._events.on_error = handler
 
-    def on_subscribing(self, handler: Callable[[ServerSubscribingContext], Coroutine[None, None, None]]):
+    def on_subscribing(self, handler: Callable[[ServerSubscribedContext], Awaitable[None]]):
         """Allows setting a callback for server-side subscriptions subscribing event."""
         self._events.on_subscribing = handler
 
-    def on_subscribed(self, handler: Callable[[ServerSubscribedContext], Coroutine[None, None, None]]):
+    def on_subscribed(self, handler: Callable[[ServerSubscribedContext], Awaitable[None]]):
         """Allows setting a callback for server-side subscriptions subscribed event."""
         self._events.on_subscribed = handler
 
-    def on_unsubscribed(self, handler: Callable[[ServerUnsubscribedContext], Coroutine[None, None, None]]):
+    def on_unsubscribed(self, handler: Callable[[ServerUnsubscribedContext], Awaitable[None]]):
         """Allows setting a callback for server-side subscriptions unsubscribed event."""
         self._events.on_unsubscribed = handler
 
-    def on_publication(self, handler: Callable[[ServerPublicationContext], Coroutine[None, None, None]]):
+    def on_publication(self, handler: Callable[[ServerPublicationContext], Awaitable[None]]):
         """Allows setting a callback for publications coming from server-side subscriptions."""
         self._events.on_publication = handler
 
-    def on_join(self, handler: Callable[[ServerJoinContext], Coroutine[None, None, None]]):
+    def on_join(self, handler: Callable[[ServerJoinContext], Awaitable[None]]):
         """Allows setting a callback for join messages coming from server-side subscriptions."""
         self._events.on_join = handler
 
-    def on_leave(self, handler: Callable[[ServerLeaveContext], Coroutine[None, None, None]]):
+    def on_leave(self, handler: Callable[[ServerLeaveContext], Awaitable[None]]):
         """Allows setting a callback for leave messages coming from server-side subscriptions."""
         self._events.on_leave = handler
 
@@ -555,7 +575,7 @@ class Client:
             self,
             channel: str,
             token: str = '',
-            get_token: Optional[Callable[..., Awaitable[None]]] = None,
+            get_token: Optional[Callable[[SubscriptionTokenContext], Awaitable[str]]] = None,
             min_resubscribe_delay=0.1,
             max_resubscribe_delay=10.0
     ):
@@ -590,7 +610,7 @@ class Client:
             return
         del self._subs[sub.channel]
 
-    async def _close(self):
+    async def _close_transport_conn(self):
         if not self._conn:
             return
         try:
@@ -631,14 +651,30 @@ class Client:
             self._conn = await websockets.connect(self._address, subprotocols=subprotocols)
         except OSError as e:
             handler = self._events.on_error
-            await handler(ErrorContext(error=e))
+            await handler(ErrorContext(code=_code_number(ErrorCode.TRANSPORT_CLOSED),error=e))
             asyncio.ensure_future(self._schedule_reconnect())
             return False
 
         self._delay = self._min_reconnect_delay
         connect = {}
+
         if self._token:
             connect['token'] = self._token
+        elif self._get_token:
+            try:
+                token = await self._get_token(ConnectionTokenContext())
+            except Exception as e:
+                if isinstance(e, Unauthorized):
+                    code = DisconnectedCode.UNAUTHORIZED
+                    await self._disconnect(_code_number(code), _code_message(code), False)
+                    return False
+                handler = self._events.on_error
+                await handler(ErrorContext(code=_code_number(ErrorCode.CLIENT_CONNECT_TOKEN),error=e))
+                asyncio.ensure_future(self._schedule_reconnect())
+                return False
+
+            self._token = token
+            connect['token'] = token
 
         cmd_id = self._next_command_id()
 
@@ -655,15 +691,21 @@ class Client:
         if not ok:
             return False
 
+        # TODO: handle exception here.
         reply = await future
-        logger.info(reply)
+
         if reply.get('error'):
             logger.debug("connect reply has error: %s", reply.get('error'))
-            if self._future:
-                self._future.set_result(False)
-            await self._close()
-            handler = self._events.on_error
-            await handler(ErrorContext(error=CentrifugeException()))
+            code, message, temporary = self._extract_error_details(reply)
+            if temporary:
+                handler = self._events.on_error
+                await handler(ErrorContext(code=_code_number(ErrorCode.CONNECT_REPLY_ERROR),
+                                           error=ReplyError(code, message, temporary)))
+                await self._schedule_reconnect()
+                return False
+            else:
+                await self._disconnect(code, message, False)
+                return False
         else:
             connect = reply['connect']
             self.client_id = connect['client']
@@ -718,6 +760,10 @@ class Client:
         return error['code'], error['message'], error.get('temporary', False)
 
     async def _subscribe(self, channel):
+        sub = self._subs.get(channel)
+        if not sub:
+            return
+
         if self.state != ClientState.CONNECTED:
             logger.debug('skip subscribe to %s until connected', channel)
             return
@@ -725,6 +771,24 @@ class Client:
         logger.debug('subscribe to channel %s', channel)
 
         subscribe = {'channel': channel}
+
+        if sub._token != '':
+            subscribe['token'] = sub._token
+        elif sub._get_token:
+            try:
+                token = await sub._get_token(SubscriptionTokenContext(channel=channel))
+            except Exception as e:
+                if isinstance(e, Unauthorized):
+                    code = UnsubscribedCode.UNAUTHORIZED
+                    await sub._move_unsubscribed(_code_number(code), _code_message(code))
+                    return False
+                handler = sub._events.on_error
+                await handler(SubscriptionErrorContext(code=_code_number(ErrorCode.SUBSCRIPTION_SUBSCRIBE_TOKEN),error=e))
+                asyncio.ensure_future(sub._schedule_resubscribe())
+                return False
+
+            sub._token = token
+            subscribe['token'] = token
 
         cmd_id = self._next_command_id()
         command = {
@@ -735,10 +799,6 @@ class Client:
 
         ok = await self._send_commands([command])
         if not ok:
-            return
-
-        sub = self._subs.get(channel)
-        if not sub:
             return
 
         # TODO: handle exception here.
@@ -779,7 +839,7 @@ class Client:
         if not ok:
             return
 
-        # TODO: handle exception and reply error here.
+        # TODO: handle exception here.
         await future
 
     def _register_future(self, cmd_id: int, timeout: float):
@@ -947,21 +1007,18 @@ class Client:
             self.state = ClientState.DISCONNECTED
 
         if self._conn and self._conn.state != 3:
-            await self._close()
+            await self._close_transport_conn()
 
         for ch, sub in self._subs.items():
             sub._future = asyncio.Future()
-            # noinspection PyProtectedMember
-            handler = sub._events.on_unsubscribed
-            if sub.state != SubscriptionState.UNSUBSCRIBED and handler:
-                await handler(UnsubscribedContext(code=code, reason=reason))
+            if sub.state == SubscriptionState.SUBSCRIBED:
+                handler = sub._events.on_subscribing
+                code = SubscribingCode.TRANSPORT_CLOSED
+                await handler(SubscribingContext(code=_code_number(code), reason=_code_message(code)))
 
         handler = self._events.on_disconnected
         if handler:
-            await handler(DisconnectedContext(
-                code=0,
-                reason=reason
-            ))
+            await handler(DisconnectedContext(code=code, reason=reason))
 
         if reconnect:
             asyncio.ensure_future(self._schedule_reconnect())
@@ -992,7 +1049,8 @@ class Client:
             await self._conn.send(commands)
             return True
         except websockets.ConnectionClosed:
-            await self._close()
+            code = ConnectingCode.TRANSPORT_CLOSED
+            await self._disconnect(_code_number(code), _code_message(code), True)
             return False
 
     async def _process_unsubscribe(self, channel: str, unsubscribe: dict):
@@ -1144,7 +1202,7 @@ class Subscription:
             client: Client,
             channel: str,
             token: str = '',
-            get_token: Optional[Callable[..., Awaitable[None]]] = None,
+            get_token: Optional[Callable[[SubscriptionTokenContext], Awaitable[str]]] = None,
             min_resubscribe_delay=0.1,
             max_resubscribe_delay=10.0,
     ):
@@ -1154,29 +1212,31 @@ class Subscription:
         self._subscribed = False
         self._client = client
         self._events = _SubscriptionEventHandler()
+        self._token = token
+        self._get_token = get_token
         self._min_resubscribe_delay = min_resubscribe_delay
         self._max_resubscribe_delay = max_resubscribe_delay
         self._resubscribe_attempts = 0
 
-    def on_subscribing(self, handler: Callable[[SubscribingContext], Coroutine[None, None, None]]):
+    def on_subscribing(self, handler: Callable[[SubscribingContext], Awaitable[None]]):
         self._events.on_subscribing = handler
 
-    def on_subscribed(self, handler: Callable[[SubscribedContext], Coroutine[None, None, None]]):
+    def on_subscribed(self, handler: Callable[[SubscribedContext], Awaitable[None]]):
         self._events.on_subscribed = handler
 
-    def on_unsubscribed(self, handler: Callable[[UnsubscribedContext], Coroutine[None, None, None]]):
+    def on_unsubscribed(self, handler: Callable[[UnsubscribedContext], Awaitable[None]]):
         self._events.on_unsubscribed = handler
 
-    def on_publication(self, handler: Callable[[PublicationContext], Coroutine[None, None, None]]):
+    def on_publication(self, handler: Callable[[PublicationContext], Awaitable[None]]):
         self._events.on_publication = handler
 
-    def on_join(self, handler: Callable[[JoinContext], Coroutine[None, None, None]]):
+    def on_join(self, handler: Callable[[JoinContext], Awaitable[None]]):
         self._events.on_join = handler
 
-    def on_leave(self, handler: Callable[[LeaveContext], Coroutine[None, None, None]]):
+    def on_leave(self, handler: Callable[[LeaveContext], Awaitable[None]]):
         self._events.on_leave = handler
 
-    def on_error(self, handler: Callable[[SubscriptionErrorContext], Coroutine[None, None, None]]):
+    def on_error(self, handler: Callable[[SubscriptionErrorContext], Awaitable[None]]):
         self._events.on_error = handler
 
     async def history(self, timeout=None) -> HistoryResult:
@@ -1248,7 +1308,7 @@ class Subscription:
             reason=message
         ))
 
-    async def _move_subscribing(self, code: int, message: str):
+    async def _move_subscribing(self, code: int, reason: str):
         if self.state == SubscriptionState.SUBSCRIBING:
             return
 
@@ -1262,7 +1322,7 @@ class Subscription:
         handler = self._events.on_subscribing
         await handler(SubscribingContext(
             code=code,
-            reason=message
+            reason=reason
         ))
 
         asyncio.ensure_future(self._client._resubscribe(self))
