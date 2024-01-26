@@ -62,6 +62,13 @@ class Client:
             max_reconnect_delay: float = 20.0,
             loop: Any = None
     ):
+        """
+        Initializes new Client instance. Client can be in one of 3 states:
+        - disconnected (initial state, or after disconnect called, or terminal disconnect code received from server)
+        - connecting (when connect called, or when automatic reconnection is in progress)
+        - connected (after successful connect)
+        See more details about SDK behaviour in https://centrifugal.dev/docs/transports/client_api.
+        """
         self.state: ClientState = ClientState.DISCONNECTED
         self._address = address
         self._events = _ConnectionEventHandler()
@@ -141,14 +148,14 @@ class Client:
             get_token: Optional[Callable[[SubscriptionTokenContext], Awaitable[str]]] = None,
             min_resubscribe_delay=0.1,
             max_resubscribe_delay=10.0
-    ):
+    ) -> 'Subscription':
         """
         Creates new subscription to channel. If subscription already exists then
         DuplicateSubscription exception will be raised.
         """
         if self.get_subscription(channel):
             raise DuplicateSubscription('subscription to channel "' + channel + '" is already registered')
-        sub = Subscription(
+        sub = Subscription._create_instance(
             self,
             channel,
             token=token,
@@ -167,7 +174,7 @@ class Client:
 
     def remove_subscription(self, sub: 'Subscription'):
         """
-        Removes subscription from client internal registry.
+        Removes subscription from client internal registry. Subscription is not usable after this call.
         """
         if not sub:
             return
@@ -175,6 +182,7 @@ class Client:
         if sub.state != SubscriptionState.UNSUBSCRIBED:
             raise CentrifugeException('can not remove subscription in non-unsubscribed state')
 
+        sub._client = None
         del self._subs[sub.channel]
 
     async def _close_transport_conn(self):
@@ -830,13 +838,21 @@ class Client:
 
 class Subscription:
     """
-    Subscription describes client subscription to a channel.
+    Subscription describes client subscription to a channel. It can be in one of 3 states:
+    - unsubscribed (initial state, or after unsubscribe called, or terminal unsubscribe code received from server)
+    - subscribing (when subscribe called, or when automatic re-subscription is in progress)
+    - subscribed (after successful subscribe)
+
+    See more details about subscriptions behaviour in https://centrifugal.dev/docs/transports/client_api.
     """
 
     _resubscribe_backoff_factor = 2
     _resubscribe_backoff_jitter = 0.5
 
-    def __init__(
+    def __init__(self):
+        raise CentrifugeException('do not create Subscription instances directly, use Client.new_subscription method')
+
+    def _initialize(
             self,
             client: Client,
             channel: str,
@@ -845,6 +861,10 @@ class Subscription:
             min_resubscribe_delay=0.1,
             max_resubscribe_delay=10.0,
     ):
+        """
+        Initializes Subscription instance.
+        Note: use Client.new_subscription method to create new subscriptions in your app.
+        """
         self.channel = channel
         self._future = asyncio.Future()
         self.state: SubscriptionState = SubscriptionState.UNSUBSCRIBED
@@ -856,6 +876,12 @@ class Subscription:
         self._min_resubscribe_delay = min_resubscribe_delay
         self._max_resubscribe_delay = max_resubscribe_delay
         self._resubscribe_attempts = 0
+
+    @classmethod
+    def _create_instance(cls, *args, **kwargs):
+        obj = cls.__new__(cls)
+        obj._initialize(*args, **kwargs)
+        return obj
 
     def on_subscribing(self, handler: Callable[[SubscribingContext], Awaitable[None]]):
         self._events.on_subscribing = handler
