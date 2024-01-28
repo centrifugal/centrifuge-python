@@ -44,3 +44,6 @@ dependencies = [
 ]
 
 dynamic = ["version"]
+
+[tool.hatch.build.targets.wheel]
+packages = [{ include = "centrifuge" }]
