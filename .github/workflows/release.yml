@@ -21,6 +21,9 @@ jobs:
       with:
         version_file_path: centrifuge/__init__.py
 
+    - name: Install build dependencies
+      run: pip install build
+
     - name: Build distribution
       run: python -m build
 
