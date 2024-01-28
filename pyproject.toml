@@ -46,7 +46,7 @@ dependencies = [
 dynamic = ["version"]
 
 [tool.hatch.build.targets.wheel]
-packages = [{ include = "centrifuge" }]
+packages = ["centrifuge"]
 
 [tool.hatch.version]
 path = "centrifuge/__init__.py"
