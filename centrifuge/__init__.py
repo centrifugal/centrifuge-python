@@ -12,6 +12,9 @@ from .types import JSON, BytesOrJSON, StreamPosition, ClientInfo, Publication, P
     HistoryResult, PresenceResult, PresenceStatsResult, RpcResult
 
 
+__version__ = "0.3.0b0"
+
+
 __all__ = [
     Client, Subscription, ClientState, SubscriptionState,
 
