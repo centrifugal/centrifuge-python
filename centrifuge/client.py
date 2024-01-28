@@ -558,15 +558,26 @@ class Client:
         self._check_reply_error(reply)
         return PublishResult()
 
-    async def history(self, channel: str, timeout=None) -> HistoryResult:
+    async def history(
+            self, channel: str, limit: int = 0, since: StreamPosition = None, reverse: bool = False, timeout=None
+    ) -> HistoryResult:
         await self.ready()
+
+        history = {
+            'channel': channel,
+            'limit': limit,
+            'reverse': reverse,
+        }
+        if since:
+            history['since'] = {
+                'offset': since.offset,
+                'epoch': since.epoch
+            }
 
         cmd_id = self._next_command_id()
         command = {
             'id': cmd_id,
-            'history': {
-                'channel': channel,
-            }
+            'history': history
         }
         future = self._register_future(cmd_id, timeout or self._timeout)
         ok = await self._send_commands([command])
@@ -574,10 +585,21 @@ class Client:
             raise ClientDisconnected()
         reply = await future
         self._check_reply_error(reply)
+
+        publications = []
+        for pub in reply['history'].get('publications', []):
+            info = pub.get('info', None)
+            client_info = self._extract_client_info(info) if info else None
+            publications.append(Publication(
+                offset=pub.get('offset', 0),
+                data=self._decode_data(pub.get('data')),
+                info=client_info
+            ))
+
         return HistoryResult(
-            epoch='',
-            offset=0,
-            publications=[]
+            epoch=reply['history'].get('epoch', ''),
+            offset=reply['history'].get('offset', 0),
+            publications=publications
         )
 
     async def presence(self, channel: str, timeout=None) -> PresenceResult:
@@ -596,8 +618,18 @@ class Client:
             raise ClientDisconnected()
         reply = await future
         self._check_reply_error(reply)
+
+        clients = {}
+        for k, v in reply['presence'].get('presence', {}).items():
+            clients[k] = ClientInfo(
+                client=v.get('client', ''),
+                user=v.get('user', ''),
+                conn_info=self._decode_data(v.get('conn_info', None)),
+                chan_info=self._decode_data(v.get('chan_info', None)),
+            )
+
         return PresenceResult(
-            clients={}
+            clients=clients
         )
 
     async def presence_stats(self, channel: str, timeout=None) -> PresenceStatsResult:
@@ -617,8 +649,8 @@ class Client:
         reply = await future
         self._check_reply_error(reply)
         return PresenceStatsResult(
-            num_clients=0,
-            num_users=0,
+            num_clients=reply['presence_stats'].get('num_clients', 0),
+            num_users=reply['presence_stats'].get('num_users', 0)
         )
 
     async def rpc(self, method: str, data: BytesOrJSON, timeout=None) -> RpcResult:
@@ -666,8 +698,10 @@ class Client:
             sub._future = asyncio.Future()
             if sub.state == SubscriptionState.SUBSCRIBED:
                 handler = sub._events.on_subscribing
-                code = _SubscribingCode.TRANSPORT_CLOSED
-                await handler(SubscribingContext(code=_code_number(code), reason=_code_message(code)))
+                unsubscribe_code = _SubscribingCode.TRANSPORT_CLOSED
+                await handler(
+                    SubscribingContext(code=_code_number(unsubscribe_code), reason=_code_message(unsubscribe_code))
+                )
 
         handler = self._events.on_disconnected
         if handler:
@@ -911,10 +945,12 @@ class Subscription:
         except asyncio.TimeoutError:
             raise Timeout('timeout waiting for subscription to be ready')
 
-    async def history(self, timeout=None) -> HistoryResult:
+    async def history(
+            self, limit: int = 0, since: StreamPosition = None, reverse: bool = False, timeout=None
+    ) -> HistoryResult:
         await self.ready(timeout=timeout)
         # noinspection PyProtectedMember
-        return await self._client.history(self.channel, timeout=timeout)
+        return await self._client.history(self.channel, limit=limit, since=since, reverse=reverse, timeout=timeout)
 
     async def presence(self, timeout=None) -> PresenceResult:
         await self.ready(timeout=timeout)

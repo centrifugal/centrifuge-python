@@ -18,3 +18,35 @@ python -m venv env
 pip install -r requirements.txt
 python -m unittest discover -s tests
 ```
+
+## Run example
+
+Start Centrifugo with config like this (defines namespace called "example", enables features used in the example):
+
+```json
+{
+  "token_hmac_secret_key": "secret",
+  "namespaces": [
+    {
+      "name": "example",
+      "presence": true,
+      "history_size": 300,
+      "history_ttl": "300s",
+      "join_leave": true,
+      "force_push_join_leave": true,
+      "allow_publish_for_subscriber": true,
+      "allow_presence_for_subscriber": true,
+      "allow_history_for_subscriber": true
+    }
+  ]
+}
+```
+
+And then:
+
+```bash
+python -m venv env
+. env/bin/activate
+pip install -r requirements.txt
+python example.py
+```

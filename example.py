@@ -1,6 +1,7 @@
 import asyncio
 import signal
 
+import centrifuge
 from centrifuge import Client, ConnectedContext, ConnectingContext, DisconnectedContext, \
     ErrorContext, SubscriptionErrorContext, LeaveContext, JoinContext, PublicationContext, \
     UnsubscribedContext, SubscribedContext, SubscribingContext, ConnectionTokenContext, \
@@ -13,7 +14,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 cf_logger = logging.getLogger('centrifuge')
-cf_logger.setLevel(logging.DEBUG)
+# cf_logger.setLevel(logging.DEBUG)
 
 
 async def connecting_handler(ctx: ConnectingContext):
@@ -79,8 +80,8 @@ async def get_subscription_token(ctx: SubscriptionTokenContext) -> str:
     logging.info("get subscription token called: %s", ctx)
 
     # REPLACE with your own logic to get token from the backend!
-    example_token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsImV4cCI6Nzc1NDI2MTM4MCwiaWF0IjoxNzA2MjYx' \
-                    'MzgwLCJjaGFubmVsIjoiY2hhbm5lbCJ9.yCgJP4N7uBCRZL9sppStO4F5NBqYsp9E6mkmLXF-1dI'
+    example_token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsImV4cCI6Nzc1NDQ0MzA1NywiaWF0IjoxNzA2NDQzMD' \
+                    'U3LCJjaGFubmVsIjoiZXhhbXBsZTpjaGFubmVsIn0._rcyM78ol1MgCqngA4Vyt8P3o1SnDX_hSXhEA_xByKU'
     return example_token
 
 
@@ -95,13 +96,18 @@ def run_example():
     client.on_disconnected(disconnected_handler)
     client.on_error(error_handler)
 
-    sub = client.new_subscription('channel', get_token=get_subscription_token)
+    sub = client.new_subscription('example:channel', get_token=get_subscription_token)
     sub.on_subscribing(subscribing_handler)
     sub.on_subscribed(subscribed_handler)
     sub.on_unsubscribed(unsubscribed_handler)
     sub.on_publication(publication_handler)
+    sub.on_join(join_handler)
+    sub.on_leave(leave_handler)
 
-    async def publish():
+    async def run():
+        asyncio.ensure_future(client.connect())
+        asyncio.ensure_future(sub.subscribe())
+
         try:
             # Note that in Protobuf case we need to encode payloads to bytes:
             # result = await sub.publish(data=json.dumps({"input": "test"}).encode())
@@ -110,10 +116,27 @@ def run_example():
         except CentrifugeException as e:
             logging.error("error publish: %s", e)
 
-    asyncio.ensure_future(client.connect())
-    asyncio.ensure_future(sub.subscribe())
-    asyncio.ensure_future(publish())
+        try:
+            result = await sub.presence_stats()
+            logging.info(result)
+        except CentrifugeException as e:
+            logging.error("error presence stats: %s", e)
 
+        try:
+            result = await sub.presence()
+            logging.info(result)
+        except CentrifugeException as e:
+            logging.error("error presence: %s", e)
+
+        try:
+            result = await sub.history(limit=1, reverse=True)
+            logging.info(result)
+        except CentrifugeException as e:
+            logging.error("error history: %s", e)
+
+        logging.info("all done, connection is still alive, press Ctrl+C to exit")
+
+    asyncio.ensure_future(run())
     loop = asyncio.get_event_loop()
 
     async def shutdown(received_signal):
