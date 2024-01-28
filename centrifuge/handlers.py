@@ -1,6 +1,6 @@
 from centrifuge.contexts import SubscriptionErrorContext, LeaveContext, JoinContext, PublicationContext, \
-    UnsubscribedContext, SubscribedContext, SubscribingContext, ServerLeaveContext, ServerJoinContext,\
-    ServerPublicationContext, ServerUnsubscribedContext, ServerSubscribingContext, ServerSubscribedContext,\
+    UnsubscribedContext, SubscribedContext, SubscribingContext, ServerLeaveContext, ServerJoinContext, \
+    ServerPublicationContext, ServerUnsubscribedContext, ServerSubscribingContext, ServerSubscribedContext, \
     ErrorContext, DisconnectedContext, ConnectedContext, ConnectingContext
 
 

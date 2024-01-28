@@ -2,6 +2,24 @@
 
 This is a WebSocket SDK for [Centrifugo](https://github.com/centrifugal/centrifugo) server (and any [Centrifuge-based](https://github.com/centrifugal/centrifuge) server) on top of Python asyncio library.
 
+Before starting to work with this library check out [Centrifugo client SDK API specification](https://centrifugal.dev/docs/transports/client_api) as it contains common information about Centrifugal real-time SDK behavior.
+
+The features implemented by this SDK can be found in [SDK feature matrix](https://centrifugal.dev/docs/transports/client_sdk#sdk-feature-matrix).
+
+## Install
+
+```
+pip install centrifuge-python
+```
+
+Then in your code:
+
+```
+from centrifuge import Client
+```
+
+See [example code](https://github.com/centrifugal/centrifuge-python/blob/master/example.py) and [how to run it](#run-example) locally.
+
 ## Run tests
 
 To run tests first start Centrifugo server:

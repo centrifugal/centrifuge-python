@@ -79,11 +79,3 @@ class HistoryResult:
     publications: List[Publication]
     offset: int
     epoch: str
-
-
-@dataclass
-class HistoryOptions:
-    """HistoryOptions is a set of options to use in history operation."""
-    limit: Optional[int]
-    since: Optional[StreamPosition]
-    reverse: Optional[bool]

@@ -1,9 +1,11 @@
 import base64
 import asyncio
 import logging
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional, Dict
 from typing import Callable, Awaitable
+from contextlib import asynccontextmanager
 import websockets
 
 from centrifuge.codecs import _JsonCodec, _ProtobufCodec
@@ -13,11 +15,11 @@ from centrifuge.contexts import PublicationContext, SubscribedContext, Subscribi
     ConnectingContext, ConnectedContext, ErrorContext, ConnectionTokenContext, ServerLeaveContext, ServerJoinContext, \
     ServerPublicationContext, ServerUnsubscribedContext, ServerSubscribedContext
 from centrifuge.exceptions import ClientDisconnected, ReplyError, CentrifugeException, Unauthorized, \
-    DuplicateSubscription, Timeout
+    DuplicateSubscription, Timeout, SubscriptionUnsubscribed
 from centrifuge.handlers import _ConnectionEventHandler, _SubscriptionEventHandler
 from centrifuge.types import StreamPosition, PublishResult, BytesOrJSON, PresenceStatsResult, PresenceResult, \
     HistoryResult, ClientInfo, RpcResult, Publication
-from centrifuge.utils import _backoff, _code_number, _code_message, _is_token_expired
+from centrifuge.utils import _backoff, _code_number, _code_message, _is_token_expired, _wait_for_future
 
 logger = logging.getLogger('centrifuge')
 
@@ -38,6 +40,13 @@ class SubscriptionState(Enum):
     UNSUBSCRIBED = 'unsubscribed'
     SUBSCRIBING = 'subscribing'
     SUBSCRIBED = 'subscribed'
+
+
+@dataclass
+class _Callback:
+    future: asyncio.Future
+    done: Optional[asyncio.Future]
+    timeout: Optional[asyncio.TimerHandle]
 
 
 class Client:
@@ -79,7 +88,7 @@ class Client:
         self._subs: Dict[str, Subscription] = {}
         self._messages = asyncio.Queue()
         self._delay = 0
-        self._reconnect = True
+        self._need_reconnect = True
         self._name = name
         self._version = version
         self._data = data
@@ -90,12 +99,16 @@ class Client:
         self._ping_interval = 0
         self._max_server_ping_delay = max_server_ping_delay
         self._ping_timer = None
-        self._future = asyncio.Future()
+        self._refresh_timer = None
+        # Optimistically keep future unresolved for newly created instance
+        # despite Client is in DISCONNECTED state.
+        self._connected_future = asyncio.Future()
         self._token = token
         self._get_token = get_token
         self._loop = loop or asyncio.get_event_loop()
-        self._futures = {}
+        self._futures: Dict[int, _Callback] = {}
         self._reconnect_attempts = 0
+        self._reconnect_timer = None
 
     def on_connecting(self, handler: Callable[[ConnectingContext], Awaitable[None]]):
         """Allows setting a callback for connecting event."""
@@ -200,7 +213,7 @@ class Client:
         if self._conn and self._conn.open:
             return
 
-        if not self._reconnect:
+        if not self._need_reconnect:
             logger.debug("won't reconnect")
             return
 
@@ -209,7 +222,12 @@ class Client:
         delay = _backoff(self._reconnect_attempts, self._min_reconnect_delay, self._max_reconnect_delay)
         self._reconnect_attempts += 1
         logger.debug("start reconnecting in %f", delay)
-        await asyncio.sleep(delay)
+        self._reconnect_timer = self._loop.call_later(
+            delay,
+            lambda: asyncio.ensure_future(self._reconnect())
+        )
+
+    async def _reconnect(self):
         if self.state != ClientState.CONNECTING:
             return
         await self._create_connection()
@@ -219,6 +237,8 @@ class Client:
         return self._id
 
     async def _create_connection(self) -> bool:
+        if self.state != ClientState.CONNECTING:
+            return False
         subprotocols = []
         if self._use_protobuf:
             subprotocols = ["centrifuge-protobuf"]
@@ -255,95 +275,107 @@ class Client:
         if self.state != ClientState.CONNECTING:
             return False
 
-        cmd_id = self._next_command_id()
+        asyncio.ensure_future(self._listen())
+        asyncio.ensure_future(self._process_messages())
 
+        cmd_id = self._next_command_id()
         command = {
             'id': cmd_id,
             'connect': connect
         }
-        future = self._register_future(cmd_id, self._timeout)
+        async with self._register_future_with_done(cmd_id, self._timeout) as future:
+            await self._send_commands([command])
 
-        asyncio.ensure_future(self._listen())
-        asyncio.ensure_future(self._process_messages())
-
-        ok = await self._send_commands([command])
-        if not ok:
-            return False
-
-        try:
-            reply = await future
-        except Timeout as e:
-            await self._close_transport_conn()
-            handler = self._events.on_error
-            await handler(ErrorContext(code=_code_number(_ErrorCode.TIMEOUT), error=e))
-            await self._schedule_reconnect()
-            return False
-        except Exception as e:
-            # TODO: think on better error handling here.
-            if self.state != ClientState.CONNECTING:
-                return False
-            await self._close_transport_conn()
-            handler = self._events.on_error
-            # TODO: think on better error code here.
-            await handler(ErrorContext(code=_code_number(_ErrorCode.TRANSPORT_CLOSED), error=e))
-            await self._schedule_reconnect()
-            return False
-
-        if self.state != ClientState.CONNECTING:
-            return False
-
-        if reply.get('error'):
-            logger.debug("connect reply has error: %s", reply.get('error'))
-            code, message, temporary = self._extract_error_details(reply)
-            if _is_token_expired(code):
-                temporary = True
-                self._token = ''
-            if temporary:
+            try:
+                reply = await future
+            except Timeout as e:
                 await self._close_transport_conn()
                 handler = self._events.on_error
-                await handler(ErrorContext(code=_code_number(_ErrorCode.CONNECT_REPLY_ERROR),
-                                           error=ReplyError(code, message, temporary)))
+                await handler(ErrorContext(code=_code_number(_ErrorCode.TIMEOUT), error=e))
                 await self._schedule_reconnect()
                 return False
-            else:
-                await self._disconnect(code, message, False)
+            except Exception as e:
+                # TODO: think on better error handling here.
+                if self.state != ClientState.CONNECTING:
+                    return False
+                await self._close_transport_conn()
+                handler = self._events.on_error
+                # TODO: think on better error code here.
+                await handler(ErrorContext(code=_code_number(_ErrorCode.TRANSPORT_CLOSED), error=e))
+                await self._schedule_reconnect()
                 return False
-        else:
-            connect = reply['connect']
-            self.client_id = connect['client']
-            self.state = ClientState.CONNECTED
-            self._send_pong = connect.get('pong', False)
-            self._ping_interval = connect.get('ping', 0)
-            if self._ping_interval > 0:
-                self._restart_ping_wait()
 
-            if self._future:
-                self._future.set_result(True)
+            if self.state != ClientState.CONNECTING:
+                return False
 
-            handler = self._events.on_connected
-            await handler(ConnectedContext(
-                client=connect.get('client'),
-                version=connect.get('version', ''),
-                data=self._decode_data(connect.get('data', None))
-            ))
+            if reply.get('error'):
+                logger.debug("connect reply has error: %s", reply.get('error'))
+                code, message, temporary = self._extract_error_details(reply)
+                if _is_token_expired(code):
+                    temporary = True
+                    self._token = ''
+                if temporary:
+                    await self._close_transport_conn()
+                    handler = self._events.on_error
+                    await handler(ErrorContext(code=_code_number(_ErrorCode.CONNECT_REPLY_ERROR),
+                                               error=ReplyError(code, message, temporary)))
+                    await self._schedule_reconnect()
+                    return False
+                else:
+                    await self._disconnect(code, message, False)
+                    return False
+            else:
+                connect = reply['connect']
+                self.client_id = connect['client']
+                self.state = ClientState.CONNECTED
+                self._send_pong = connect.get('pong', False)
+                self._ping_interval = connect.get('ping', 0)
+                if self._ping_interval > 0:
+                    self._restart_ping_wait()
 
-            self._reconnect_attempts = 0
+                expires = connect.get('expires', False)
+                if expires:
+                    ttl = connect['ttl']
+                    self._refresh_timer = self._loop.call_later(
+                        ttl,
+                        lambda: asyncio.ensure_future(self._refresh(), loop=self._loop)
+                    )
 
-            channels = self._subs.keys()
-            for channel in channels:
-                sub = self._subs[channel]
-                if not sub or sub.state != SubscriptionState.SUBSCRIBING:
-                    continue
-                asyncio.ensure_future(self._subscribe(channel))
+                self._connected_future.set_result(True)
+
+                handler = self._events.on_connected
+                await handler(ConnectedContext(
+                    client=connect.get('client'),
+                    version=connect.get('version', ''),
+                    data=self._decode_data(connect.get('data', None))
+                ))
+
+                self._clear_connecting_state()
+
+                channels = self._subs.keys()
+                for channel in channels:
+                    sub = self._subs[channel]
+                    if not sub or sub.state != SubscriptionState.SUBSCRIBING:
+                        continue
+                    asyncio.ensure_future(self._subscribe(channel))
+
+    def _clear_connecting_state(self):
+        self._reconnect_attempts = 0
+        if self._reconnect_timer:
+            logger.debug("clear reconnect timer")
+            self._reconnect_timer.cancel()
+            self._reconnect_timer = None
 
     async def connect(self):
         """
         Initiate connection to server.
         """
-        if self.state == ClientState.CONNECTING:
+        if self.state == ClientState.CONNECTING or self.state == ClientState.CONNECTED:
             return
 
         self.state = ClientState.CONNECTING
+        if self._connected_future.done():
+            self._connected_future = asyncio.Future()
 
         handler = self._events.on_connecting
         code = _ConnectingCode.CONNECT_CALLED
@@ -359,6 +391,114 @@ class Client:
 
         code = _DisconnectedCode.DISCONNECT_CALLED
         await self._disconnect(_code_number(code), _code_message(code), False)
+
+    async def _refresh(self):
+        cmd_id = self._next_command_id()
+
+        try:
+            token = await self._get_token(ConnectionTokenContext())
+        except Exception as e:
+            if isinstance(e, Unauthorized):
+                code = _DisconnectedCode.UNAUTHORIZED
+                await self._disconnect(_code_number(code), _code_message(code), False)
+                return
+            handler = self._events.on_error
+            await handler(ErrorContext(code=_code_number(_ErrorCode.CLIENT_REFRESH_TOKEN), error=e))
+            return
+
+        self._token = token
+        command = {
+            'id': cmd_id,
+            'refresh': {
+                'token': token
+            }
+        }
+        future = self._register_future(cmd_id, self._timeout)
+        await self._send_commands([command])
+
+        try:
+            reply = await future
+        except Exception as e:
+            handler = self._events.on_error
+            await handler(ErrorContext(code=_code_number(_ErrorCode.CLIENT_REFRESH_TOKEN), error=e))
+            return
+
+        if reply.get('error'):
+            code, message, temporary = self._extract_error_details(reply)
+            handler = self._events.on_error
+            await handler(
+                ErrorContext(
+                    code=_code_number(_ErrorCode.CLIENT_REFRESH_TOKEN),
+                    error=ReplyError(code, message, temporary)
+                )
+            )
+            return
+
+        refresh = reply['refresh']
+        expires = refresh.get('expires', False)
+        if expires:
+            ttl = refresh['ttl']
+            self._refresh_timer = self._loop.call_later(
+                ttl,
+                lambda: asyncio.ensure_future(self._refresh(), loop=self._loop)
+            )
+
+    async def _sub_refresh(self, channel: str):
+        sub = self._subs.get(channel)
+        if not sub:
+            return
+
+        try:
+            token = await sub._get_token(SubscriptionTokenContext(channel=channel))
+        except Exception as e:
+            if isinstance(e, Unauthorized):
+                code = _UnsubscribedCode.UNAUTHORIZED
+                await sub._move_unsubscribed(_code_number(code), _code_message(code), send_unsubscribe_command=True)
+                return
+            handler = sub._events.on_error
+            await handler(
+                SubscriptionErrorContext(code=_code_number(_ErrorCode.SUBSCRIPTION_SUBSCRIBE_TOKEN), error=e))
+            asyncio.ensure_future(sub._schedule_resubscribe())
+            return
+
+        cmd_id = self._next_command_id()
+        sub._token = token
+        command = {
+            'id': cmd_id,
+            'sub_refresh': {
+                'token': token
+            }
+        }
+
+        future = self._register_future(cmd_id, self._timeout)
+        await self._send_commands([command])
+
+        try:
+            reply = await future
+        except Exception as e:
+            handler = sub._events.on_error
+            await handler(SubscriptionErrorContext(code=_code_number(_ErrorCode.SUBSCRIPTION_REFRESH_TOKEN), error=e))
+            return
+
+        if reply.get('error'):
+            code, message, temporary = self._extract_error_details(reply)
+            handler = sub._events.on_error
+            await handler(
+                SubscriptionErrorContext(
+                    code=_code_number(_ErrorCode.SUBSCRIPTION_REFRESH_TOKEN),
+                    error=ReplyError(code, message, temporary)
+                )
+            )
+            return
+
+        sub_refresh = reply['sub_refresh']
+        expires = sub_refresh.get('expires', False)
+        if expires:
+            ttl = sub_refresh['ttl']
+            sub._refresh_timer = self._loop.call_later(
+                ttl,
+                lambda: asyncio.ensure_future(sub._refresh(), loop=self._loop)
+            )
 
     @staticmethod
     def _extract_error_details(reply):
@@ -402,53 +542,49 @@ class Client:
             'id': cmd_id,
             'subscribe': subscribe
         }
-        future = self._register_future(cmd_id, self._timeout)
-
-        ok = await self._send_commands([command])
-        if not ok:
-            return
-
-        try:
-            reply = await future
-        except Timeout as e:
-            if sub.state != SubscriptionState.SUBSCRIBING:
-                return
-            handler = sub._events.on_error
-            await handler(SubscriptionErrorContext(code=_code_number(_ErrorCode.TIMEOUT), error=e))
-            await sub._schedule_resubscribe()
-            return
-        except Exception as e:
-            # TODO: think on better error handling here.
-            if sub.state != SubscriptionState.SUBSCRIBING:
-                return
-            handler = sub._events.on_error
-            # TODO: think on better error code here.
-            await handler(SubscriptionErrorContext(code=_code_number(_ErrorCode.TRANSPORT_CLOSED), error=e))
-            await sub._schedule_resubscribe()
-            return
-
-        if sub.state != SubscriptionState.SUBSCRIBING:
-            return
-
-        if reply.get('error'):
-            logger.debug("subscribe reply has error: %s", reply.get('error'))
-            code, message, temporary = self._extract_error_details(reply)
-            if _is_token_expired(code):
-                temporary = True
-                sub._token = ''
-            if temporary:
+        async with self._register_future_with_done(cmd_id, self._timeout) as future:
+            await self._send_commands([command])
+            try:
+                reply = await future
+            except Timeout as e:
+                if sub.state != SubscriptionState.SUBSCRIBING:
+                    return
                 handler = sub._events.on_error
-                await handler(SubscriptionErrorContext(
-                    code=_code_number(_ErrorCode.SUBSCRIBE_REPLY_ERROR),
-                    error=ReplyError(code, message, temporary)))
-                # noinspection PyProtectedMember
+                await handler(SubscriptionErrorContext(code=_code_number(_ErrorCode.TIMEOUT), error=e))
                 await sub._schedule_resubscribe()
+                return
+            except Exception as e:
+                # TODO: think on better error handling here.
+                if sub.state != SubscriptionState.SUBSCRIBING:
+                    return
+                handler = sub._events.on_error
+                # TODO: think on better error code here.
+                await handler(SubscriptionErrorContext(code=_code_number(_ErrorCode.TRANSPORT_CLOSED), error=e))
+                await sub._schedule_resubscribe()
+                return
+
+            if sub.state != SubscriptionState.SUBSCRIBING:
+                return
+
+            if reply.get('error'):
+                logger.debug("subscribe reply has error: %s", reply.get('error'))
+                code, message, temporary = self._extract_error_details(reply)
+                if _is_token_expired(code):
+                    temporary = True
+                    sub._token = ''
+                if temporary:
+                    handler = sub._events.on_error
+                    await handler(SubscriptionErrorContext(
+                        code=_code_number(_ErrorCode.SUBSCRIBE_REPLY_ERROR),
+                        error=ReplyError(code, message, temporary)))
+                    # noinspection PyProtectedMember
+                    await sub._schedule_resubscribe()
+                else:
+                    # noinspection PyProtectedMember
+                    await sub._move_unsubscribed(code, message)
             else:
                 # noinspection PyProtectedMember
-                await sub._move_unsubscribed(code, message)
-        else:
-            # noinspection PyProtectedMember
-            await sub._move_subscribed(reply['subscribe'])
+                await sub._move_subscribed(reply['subscribe'])
 
     async def _resubscribe(self, sub: 'Subscription'):
         self._subs[sub.channel] = sub
@@ -468,9 +604,7 @@ class Client:
         }
         future = self._register_future(cmd_id, self._timeout)
 
-        ok = await self._send_commands([command])
-        if not ok:
-            return
+        await self._send_commands([command])
 
         try:
             await future
@@ -479,33 +613,77 @@ class Client:
             await self._disconnect(_code_number(code), _code_message(code), True)
             return
 
-    def _register_future(self, cmd_id: int, timeout: float):
+    def _register_future(self, cmd_id: int, timeout: float) -> asyncio.Future:
         future = asyncio.Future()
-        self._futures[cmd_id] = future
 
+        th = None
         if timeout:
             def cb():
                 if not future.done():
-                    future.set_exception(Timeout())
-                    del self._futures[cmd_id]
+                    self._future_error(cmd_id, Timeout())
 
-            self._loop.call_later(timeout, cb)
+            th = self._loop.call_later(timeout, cb)
+
+        self._futures[cmd_id] = _Callback(
+            future=future,
+            done=None,
+            timeout=th
+        )
 
         return future
 
-    def _future_error(self, cmd_id: int, error: str):
-        future = self._futures.get(cmd_id)
-        if not future:
+    @asynccontextmanager
+    async def _register_future_with_done(self, cmd_id: int, timeout: float):
+        """
+        This is an asynccontextmanager version of _register_future. It's required to
+        wait for the full processing of connect/subscribe replies before applying any
+        async pushes coming from the server. This way we can be sure that publications
+        processed in order by the application.
+        """
+        future = asyncio.Future()
+        done = asyncio.Future()
+
+        th = None
+        if timeout:
+            def cb():
+                if not future.done():
+                    self._future_error(cmd_id, Timeout())
+
+            th = self._loop.call_later(timeout, cb)
+
+        cb = _Callback(
+            future=future,
+            done=done,
+            timeout=th
+        )
+
+        self._futures[cmd_id] = cb
+
+        try:
+            yield future
+        finally:
+            done.set_result(True)
+
+    def _future_error(self, cmd_id: int, exc: Exception):
+        cb = self._futures.get(cmd_id)
+        if not cb:
             return
-        future.set_exception(CentrifugeException(error))
+        cb.future.set_exception(exc)
+        if cb.done:
+            cb.done.set_result(True)
         del self._futures[cmd_id]
 
-    def _future_success(self, cmd_id: int, reply):
-        future = self._futures.get(cmd_id)
-        if not future:
+    async def _future_success(self, cmd_id: int, reply):
+        cb = self._futures.get(cmd_id)
+        if not cb:
             return
+        future = cb.future
         future.set_result(reply)
         del self._futures[cmd_id]
+        if cb.timeout:
+            cb.timeout.cancel()
+        if cb.done:
+            await cb.done
 
     def _decode_data(self, data: BytesOrJSON):
         if data is None:
@@ -534,9 +712,8 @@ class Client:
             raise ReplyError(error['code'], error['message'], error.get('temporary', False))
 
     async def ready(self, timeout=None):
-        try:
-            await asyncio.wait_for(self._future, timeout=timeout or self._timeout)
-        except asyncio.TimeoutError:
+        completed = await _wait_for_future(self._connected_future, timeout=timeout or self._timeout)
+        if not completed:
             raise Timeout('timeout waiting for connection to be ready')
 
     async def publish(self, channel: str, data: BytesOrJSON, timeout=None) -> PublishResult:
@@ -551,9 +728,7 @@ class Client:
             }
         }
         future = self._register_future(cmd_id, timeout or self._timeout)
-        ok = await self._send_commands([command])
-        if not ok:
-            raise ClientDisconnected()
+        await self._send_commands([command])
         reply = await future
         self._check_reply_error(reply)
         return PublishResult()
@@ -580,9 +755,7 @@ class Client:
             'history': history
         }
         future = self._register_future(cmd_id, timeout or self._timeout)
-        ok = await self._send_commands([command])
-        if not ok:
-            raise ClientDisconnected()
+        await self._send_commands([command])
         reply = await future
         self._check_reply_error(reply)
 
@@ -613,9 +786,7 @@ class Client:
             }
         }
         future = self._register_future(cmd_id, timeout or self._timeout)
-        ok = await self._send_commands([command])
-        if not ok:
-            raise ClientDisconnected()
+        await self._send_commands([command])
         reply = await future
         self._check_reply_error(reply)
 
@@ -643,9 +814,7 @@ class Client:
             }
         }
         future = self._register_future(cmd_id, timeout or self._timeout)
-        ok = await self._send_commands([command])
-        if not ok:
-            raise ClientDisconnected()
+        await self._send_commands([command])
         reply = await future
         self._check_reply_error(reply)
         return PresenceStatsResult(
@@ -665,14 +834,19 @@ class Client:
             }
         }
         future = self._register_future(cmd_id, timeout or self._timeout)
-        ok = await self._send_commands([command])
-        if not ok:
-            raise ClientDisconnected()
+        await self._send_commands([command])
         reply = await future
         self._check_reply_error(reply)
         return RpcResult(
             data=self._decode_data(reply['rpc'].get('data'))
         )
+
+    def _clear_outgoing_futures(self):
+        command_ids = []
+        for cmd_id in self._futures.keys():
+            command_ids.append(cmd_id)
+        for cmd_id in command_ids:
+            self._future_error(cmd_id, ClientDisconnected(f'command {cmd_id} canceled due to disconnect'))
 
     async def _disconnect(self, code: int, reason: str, reconnect: bool):
         if self._ping_timer:
@@ -680,27 +854,44 @@ class Client:
             self._ping_timer.cancel()
             self._ping_timer = None
 
+        if self._refresh_timer:
+            logger.debug('canceling refresh timer')
+            self._refresh_timer.cancel()
+            self._refresh_timer = None
+
+        self._clear_connecting_state()
+
+        await self._messages.put(None)
+        self._messages = asyncio.Queue()
+
         if not reconnect:
-            self._reconnect = False
+            self._need_reconnect = False
 
         if self.state == ClientState.DISCONNECTED:
             return
 
+        self._clear_outgoing_futures()
+
+        if self._connected_future.done():
+            self._connected_future = asyncio.Future()
+
         if reconnect:
             self.state = ClientState.CONNECTING
         else:
+            self._connected_future.set_exception(ClientDisconnected(f'client disconnected: {code} ({reason})'))
+            await self._consume_connected_future()
             self.state = ClientState.DISCONNECTED
 
         if self._conn and self._conn.state != 3:
             await self._close_transport_conn()
 
         for ch, sub in self._subs.items():
-            sub._future = asyncio.Future()
             if sub.state == SubscriptionState.SUBSCRIBED:
-                handler = sub._events.on_subscribing
                 unsubscribe_code = _SubscribingCode.TRANSPORT_CLOSED
-                await handler(
-                    SubscribingContext(code=_code_number(unsubscribe_code), reason=_code_message(unsubscribe_code))
+                await sub._move_subscribing(
+                    code=_code_number(unsubscribe_code),
+                    reason=_code_message(unsubscribe_code),
+                    skip_schedule_resubscribe=True
                 )
 
         handler = self._events.on_disconnected
@@ -709,6 +900,12 @@ class Client:
 
         if reconnect:
             asyncio.ensure_future(self._schedule_reconnect())
+
+    async def _consume_connected_future(self):
+        try:
+            await self._connected_future
+        except CentrifugeException:
+            pass
 
     async def _no_ping(self):
         code = _ConnectingCode.NO_PING
@@ -734,11 +931,9 @@ class Client:
         commands = self._codec.encode_commands(commands)
         try:
             await self._conn.send(commands)
-            return True
         except websockets.ConnectionClosed:
             code = _ConnectingCode.TRANSPORT_CLOSED
             await self._disconnect(_code_number(code), _code_message(code), True)
-            return False
 
     async def _process_unsubscribe(self, channel: str, unsubscribe: dict):
         sub = self._subs.get(channel, None)
@@ -759,7 +954,7 @@ class Client:
 
     async def _process_reply(self, reply):
         if reply.get('id', 0) > 0:
-            self._future_success(reply['id'], reply)
+            await self._future_success(reply['id'], reply)
         elif reply.get('push'):
             logger.debug("received push reply %s", str(reply))
             push = reply['push']
@@ -831,8 +1026,11 @@ class Client:
         while True:
             if self._messages:
                 message = await self._messages.get()
+                if message is None:
+                    break
                 logger.debug("start processing message: %s", str(message))
                 await self._process_incoming_data(message)
+        logger.debug("stop message processing routine")
 
     async def _listen(self):
         logger.debug("start reading connection")
@@ -849,6 +1047,9 @@ class Client:
 
         ws_code = self._conn.close_code
         ws_reason = self._conn.close_reason
+        if not ws_code:
+            ws_code = 0
+            ws_reason = ""
         logger.debug("connection closed, code: %d, reason: %s", ws_code, ws_reason)
 
         default_code = _ConnectingCode.TRANSPORT_CLOSED
@@ -901,8 +1102,10 @@ class Subscription:
         Note: use Client.new_subscription method to create new subscriptions in your app.
         """
         self.channel = channel
-        self._future = asyncio.Future()
         self.state: SubscriptionState = SubscriptionState.UNSUBSCRIBED
+        # Optimistically keep future unresolved for newly created instance
+        # despite Subscription is in UNSUBSCRIBED state.
+        self._subscribed_future = asyncio.Future()
         self._subscribed = False
         self._client = client
         self._events = _SubscriptionEventHandler()
@@ -911,6 +1114,8 @@ class Subscription:
         self._min_resubscribe_delay = min_resubscribe_delay
         self._max_resubscribe_delay = max_resubscribe_delay
         self._resubscribe_attempts = 0
+        self._refresh_timer = None
+        self._resubscribe_timer = None
 
     @classmethod
     def _create_instance(cls, *args, **kwargs):
@@ -940,9 +1145,8 @@ class Subscription:
         self._events.on_error = handler
 
     async def ready(self, timeout=None):
-        try:
-            await asyncio.wait_for(self._future, timeout=timeout or self._client._timeout)
-        except asyncio.TimeoutError:
+        completed = await _wait_for_future(self._subscribed_future, timeout=timeout or self._client._timeout)
+        if not completed:
             raise Timeout('timeout waiting for subscription to be ready')
 
     async def history(
@@ -981,52 +1185,65 @@ class Subscription:
         await self._client._resubscribe(self)
 
     async def unsubscribe(self):
-        if self.state == SubscriptionState.UNSUBSCRIBED:
-            return
-        self.state = SubscriptionState.UNSUBSCRIBED
-
-        handler = self._events.on_unsubscribed
         code = _UnsubscribedCode.UNSUBSCRIBE_CALLED
-        await handler(UnsubscribedContext(code=_code_number(code), reason=_code_message(code)))
+        await self._move_unsubscribed(
+            code=_code_number(code), reason=_code_message(code), send_unsubscribe_command=True)
 
-        # noinspection PyProtectedMember
-        await self._client._unsubscribe(self.channel)
+    def _clear_subscribed_state(self):
+        if self._refresh_timer:
+            logger.debug('canceling refresh timer for %s', self.channel)
+            self._refresh_timer.cancel()
+            self._refresh_timer = None
 
-    async def _schedule_resubscribe(self):
-        if self.state != SubscriptionState.SUBSCRIBING:
-            return
+    def _clear_subscribing_state(self):
+        self._resubscribe_attempts = 0
+        if self._resubscribe_timer:
+            logger.debug('canceling resubscribe timer for %s', self.channel)
+            self._resubscribe_timer.cancel()
+            self._resubscribe_timer = None
 
-        delay = _backoff(self._resubscribe_attempts, self._min_resubscribe_delay, self._max_resubscribe_delay)
-        self._resubscribe_attempts += 1
-        logger.debug("start resubscribing in %f", delay)
-        await asyncio.sleep(delay)
-        if self.state != SubscriptionState.SUBSCRIBING:
-            return
-        # noinspection PyProtectedMember
-        await self._client._resubscribe(self)
-
-    async def _move_unsubscribed(self, code: int, message: str):
+    async def _move_unsubscribed(self, code: int, reason: str, send_unsubscribe_command=False):
         if self.state == SubscriptionState.UNSUBSCRIBED:
             return
 
+        if self.state == SubscriptionState.SUBSCRIBED:
+            self._clear_subscribed_state()
+        elif self.state == SubscriptionState.SUBSCRIBING:
+            self._clear_subscribing_state()
+
         self.state = SubscriptionState.UNSUBSCRIBED
+
+        if self._subscribed_future.done():
+            self._subscribed_future = asyncio.Future()
+        self._subscribed_future.set_exception(SubscriptionUnsubscribed('subscription unsubscribed'))
+        await self._consume_subscribed_future()
 
         handler = self._events.on_unsubscribed
         await handler(UnsubscribedContext(
             code=code,
-            reason=message
+            reason=reason
         ))
 
-    async def _move_subscribing(self, code: int, reason: str):
+        if send_unsubscribe_command:
+            # noinspection PyProtectedMember
+            await self._client._unsubscribe(self.channel)
+
+    async def _consume_subscribed_future(self):
+        try:
+            await self._subscribed_future
+        except CentrifugeException:
+            pass
+
+    async def _move_subscribing(self, code: int, reason: str, skip_schedule_resubscribe=False):
         if self.state == SubscriptionState.SUBSCRIBING:
             return
 
         if self.state == SubscriptionState.SUBSCRIBED:
-            # TODO: implement.
-            # self._clear_subscribed_state()
-            pass
+            self._clear_subscribed_state()
 
         self.state = SubscriptionState.SUBSCRIBING
+        if self._subscribed_future.done():
+            self._subscribed_future = asyncio.Future()
 
         handler = self._events.on_subscribing
         await handler(SubscribingContext(
@@ -1034,11 +1251,12 @@ class Subscription:
             reason=reason
         ))
 
-        asyncio.ensure_future(self._client._resubscribe(self))
+        if not skip_schedule_resubscribe:
+            asyncio.ensure_future(self._client._resubscribe(self))
 
     async def _move_subscribed(self, subscribe):
         self.state = SubscriptionState.SUBSCRIBED
-        self._future.set_result(True)
+        self._subscribed_future.set_result(True)
         handler = self._events.on_subscribed
         recoverable = subscribe.get('recoverable', False)
         positioned = subscribe.get('positioned', False)
@@ -1048,6 +1266,15 @@ class Subscription:
                 offset=subscribe.get('offset', 0),
                 epoch=subscribe.get('epoch', '')
             )
+
+        expires = subscribe.get('expires', False)
+        if expires:
+            ttl = subscribe['ttl']
+            self._refresh_timer = self._client._loop.call_later(
+                ttl,
+                lambda: asyncio.ensure_future(self._refresh(), loop=self._client._loop)
+            )
+
         await handler(SubscribedContext(
             channel=self.channel,
             recoverable=recoverable,
@@ -1072,4 +1299,27 @@ class Subscription:
                     )
                 ))
 
-        self._resubscribe_attempts = 0
+        self._clear_subscribing_state()
+
+    async def _refresh(self):
+        if self.state != SubscriptionState.SUBSCRIBED:
+            return
+        await self._client._sub_refresh(self.channel)
+
+    async def _schedule_resubscribe(self):
+        if self.state != SubscriptionState.SUBSCRIBING:
+            return
+
+        delay = _backoff(self._resubscribe_attempts, self._min_resubscribe_delay, self._max_resubscribe_delay)
+        self._resubscribe_attempts += 1
+        logger.debug("start resubscribing in %f", delay)
+        self._resubscribe_timer = self._client._loop.call_later(
+            delay,
+            lambda: asyncio.ensure_future(self._resubscribe())
+        )
+
+    async def _resubscribe(self):
+        if self.state != SubscriptionState.SUBSCRIBING:
+            return
+        # noinspection PyProtectedMember
+        await self._client._resubscribe(self)

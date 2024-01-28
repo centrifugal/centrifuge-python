@@ -1,20 +1,19 @@
 import asyncio
 import signal
 
-import centrifuge
 from centrifuge import Client, ConnectedContext, ConnectingContext, DisconnectedContext, \
     ErrorContext, SubscriptionErrorContext, LeaveContext, JoinContext, PublicationContext, \
     UnsubscribedContext, SubscribedContext, SubscribingContext, ConnectionTokenContext, \
     SubscriptionTokenContext, CentrifugeException
 
-# Configure logging.
 import logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+# Configure centrifuge-python logger.
 cf_logger = logging.getLogger('centrifuge')
-# cf_logger.setLevel(logging.DEBUG)
+cf_logger.setLevel(logging.DEBUG)
 
 
 async def connecting_handler(ctx: ConnectingContext):
