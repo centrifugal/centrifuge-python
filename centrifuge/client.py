@@ -850,6 +850,7 @@ class Subscription:
     _resubscribe_backoff_jitter = 0.5
 
     def __init__(self):
+        self.state = None  # Required to make PyCharm linting happy.
         raise CentrifugeException('do not create Subscription instances directly, use Client.new_subscription method')
 
     def _initialize(
@@ -933,6 +934,7 @@ class Subscription:
     async def subscribe(self):
         if self.state == SubscriptionState.SUBSCRIBING:
             return
+
         self.state = SubscriptionState.SUBSCRIBING
 
         handler = self._events.on_subscribing
@@ -999,6 +1001,7 @@ class Subscription:
         asyncio.ensure_future(self._client._resubscribe(self))
 
     async def _move_subscribed(self, subscribe):
+        self.state = SubscriptionState.SUBSCRIBED
         self._future.set_result(True)
         handler = self._events.on_subscribed
         recoverable = subscribe.get('recoverable', False)
