@@ -49,5 +49,4 @@ dynamic = ["version"]
 packages = [{ include = "centrifuge" }]
 
 [tool.hatch.version]
-source = "file"
 path = "centrifuge/__init__.py"
