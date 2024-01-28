@@ -15,20 +15,24 @@ cf_logger.setLevel(logging.DEBUG)
 class TestClient(unittest.IsolatedAsyncioTestCase):
 
     async def test_client_connects_disconnects(self):
-        client = Client('ws://localhost:8000/connection/websocket')
-        await client.connect()
-        await client.ready()
-        self.assertTrue(client.state == ClientState.CONNECTED)
-        await client.disconnect()
-        self.assertTrue(client.state == ClientState.DISCONNECTED)
+        for use_protobuf in (False, True):
+            with self.subTest(use_protobuf=use_protobuf):
+                client = Client('ws://localhost:8000/connection/websocket', use_protobuf=use_protobuf)
+                await client.connect()
+                await client.ready()
+                self.assertTrue(client.state == ClientState.CONNECTED)
+                await client.disconnect()
+                self.assertTrue(client.state == ClientState.DISCONNECTED)
 
     async def test_client_subscribe_unsubscribes(self):
-        client = Client('ws://localhost:8000/connection/websocket')
-        sub = client.new_subscription('channel')
-        asyncio.ensure_future(client.connect())
-        await sub.subscribe()
-        await sub.ready()
-        self.assertTrue(sub.state == SubscriptionState.SUBSCRIBED)
-        await sub.unsubscribe()
-        self.assertTrue(sub.state == SubscriptionState.UNSUBSCRIBED)
-        await client.disconnect()
+        for use_protobuf in (False, True):
+            with self.subTest(use_protobuf=use_protobuf):
+                client = Client('ws://localhost:8000/connection/websocket', use_protobuf=use_protobuf)
+                sub = client.new_subscription('channel')
+                asyncio.ensure_future(client.connect())
+                await sub.subscribe()
+                await sub.ready()
+                self.assertTrue(sub.state == SubscriptionState.SUBSCRIBED)
+                await sub.unsubscribe()
+                self.assertTrue(sub.state == SubscriptionState.UNSUBSCRIBED)
+                await client.disconnect()

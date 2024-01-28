@@ -1,8 +1,6 @@
 # centrifuge-python (work in progress)
 
-WORK IN PROGRESS
-
-This is a websocket SDK for [Centrifugo](https://github.com/centrifugal/centrifugo) server on top of Python asyncio library.
+This is a WebSocket SDK for [Centrifugo](https://github.com/centrifugal/centrifugo) server (and any [Centrifuge-based](https://github.com/centrifugal/centrifuge) server) on top of Python asyncio library.
 
 ## Run tests
 
@@ -15,5 +13,8 @@ docker run -p 8000:8000 centrifugo/centrifugo:v5 centrifugo --client_insecure --
 And then:
 
 ```bash
+python -m venv env
+. env/bin/activate
+pip install -r requirements.txt
 python -m unittest discover -s tests
 ```
