@@ -1,15 +1,15 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from centrifuge.types import BytesOrJSON, ClientInfo, StreamPosition, Publication
+from centrifuge.types import BytesOrJSON, ClientInfo, Publication, StreamPosition
 
 
 @dataclass
 class ConnectedContext:
-    """
-    ConnectedContext is a context passed to on_connected callback.
+    """ConnectedContext is a context passed to on_connected callback.
 
-    Attributes:
+    Attributes
+    ----------
         client: client ID.
         version: server version.
         data: optional data returned from server on connect (i.e. can be None).
@@ -22,10 +22,10 @@ class ConnectedContext:
 
 @dataclass
 class ConnectingContext:
-    """
-    ConnectingContext is a context passed to on_connecting callback.
+    """ConnectingContext is a context passed to on_connecting callback.
 
-    Attributes:
+    Attributes
+    ----------
         code: code of state transition.
         reason: reason of state transition.
     """
@@ -36,13 +36,14 @@ class ConnectingContext:
 
 @dataclass
 class DisconnectedContext:
-    """
-    DisconnectedContext is a context passed to on_disconnected callback.
+    """DisconnectedContext is a context passed to on_disconnected callback.
 
-    Attributes:
+    Attributes
+    ----------
         code: code of state transition.
         reason: reason of state transition.
     """
+
     code: int
     reason: str
 
@@ -57,28 +58,38 @@ class ErrorContext:
 
 @dataclass
 class ServerSubscribingContext:
-    """ServerSubscribingContext is a context passed to on_subscribing callback for server-side subscriptions."""
+    """ServerSubscribingContext is a context
+    passed to on_subscribing callback for server-side subscriptions.
+    """
+
     channel: str
 
 
 @dataclass
 class ServerSubscribedContext:
-    """ServerSubscribedContext is a context passed to on_subscribed callback for server-side subscriptions."""
+    """ServerSubscribedContext is a context
+    passed to on_subscribed callback for server-side subscriptions.
+    """
+
     channel: str
 
 
 @dataclass
 class ServerUnsubscribedContext:
-    """ServerUnsubscribedContext is a context passed to on_unsubscribed callback for server-side subscriptions."""
+    """ServerUnsubscribedContext is a context
+    passed to on_unsubscribed callback for server-side subscriptions.
+    """
+
     channel: str
 
 
 @dataclass
 class ServerPublicationContext:
-    """
-    ServerPublicationContext is a context passed to on_publication callback for server-side subscriptions.
+    """ServerPublicationContext is a context passed to on_publication callback for server-side
+    subscriptions.
 
-    Attributes:
+    Attributes
+    ----------
         channel: channel from which publication received.
         pub: Publication object.
     """
@@ -90,13 +101,17 @@ class ServerPublicationContext:
 @dataclass
 class ServerJoinContext:
     """ServerJoinContext is a context passed to on_join callback for server-side subscriptions."""
+
     channel: str
     info: ClientInfo
 
 
 @dataclass
 class ServerLeaveContext:
-    """ServerLeaveContext is a context passed to on_leave callback for server-side subscriptions."""
+    """
+    ServerLeaveContext is a context passed to on_leave callback for server-side subscriptions.
+    """
+
     channel: str
     info: ClientInfo
 
@@ -104,6 +119,7 @@ class ServerLeaveContext:
 @dataclass
 class SubscribingContext:
     """SubscribingContext is a context passed to on_subscribing callback."""
+
     code: int
     reason: str
 
@@ -111,6 +127,7 @@ class SubscribingContext:
 @dataclass
 class SubscribedContext:
     """SubscribedContext is a context passed to on_subscribed callback."""
+
     channel: str
     recoverable: bool
     positioned: bool
@@ -123,6 +140,7 @@ class SubscribedContext:
 @dataclass
 class UnsubscribedContext:
     """UnsubscribedContext is a context passed to on_unsubscribed callback."""
+
     code: int
     reason: str
 
@@ -130,24 +148,28 @@ class UnsubscribedContext:
 @dataclass
 class PublicationContext:
     """PublicationContext is a context passed to on_publication callback."""
+
     pub: Publication
 
 
 @dataclass
 class JoinContext:
     """JoinContext is a context passed to on_join callback."""
+
     info: ClientInfo
 
 
 @dataclass
 class LeaveContext:
     """LeaveContext is a context passed to on_leave callback."""
+
     info: ClientInfo
 
 
 @dataclass
 class SubscriptionErrorContext:
     """SubscriptionErrorContext is a context passed to on_error callback of subscription."""
+
     code: int
     error: Exception
 
@@ -155,10 +177,10 @@ class SubscriptionErrorContext:
 @dataclass
 class ConnectionTokenContext:
     """ConnectionTokenContext is a context passed to get_token callback of connection."""
-    pass
 
 
 @dataclass
 class SubscriptionTokenContext:
     """SubscriptionTokenContext is a context passed to get_token callback of subscription."""
+
     channel: str

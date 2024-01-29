@@ -1,29 +1,27 @@
 import json
 
-from google.protobuf.json_format import ParseDict
-from google.protobuf.json_format import MessageToDict
+from google.protobuf.json_format import MessageToDict, ParseDict
+
 import centrifuge.protocol.client_pb2 as protocol
 
 
 class _JsonCodec:
-    """
-    _JsonCodec is a default codec for Centrifuge library. It encodes commands using JSON.
-    """
+    """_JsonCodec is a default codec for Centrifuge library. It encodes commands using JSON."""
 
     @staticmethod
     def encode_commands(commands):
-        return '\n'.join(json.dumps(command) for command in commands)
+        return "\n".join(json.dumps(command) for command in commands)
 
     @staticmethod
     def decode_replies(data):
-        return [json.loads(reply) for reply in data.strip().split('\n')]
+        return [json.loads(reply) for reply in data.strip().split("\n")]
 
 
 def _varint_encode(number):
     """Encode an integer as a varint."""
     buffer = []
     while True:
-        towrite = number & 0x7f
+        towrite = number & 0x7F
         number >>= 7
         if number:
             buffer.append(towrite | 0x80)
@@ -40,7 +38,7 @@ def _varint_decode(buffer, position):
     while True:
         byte = buffer[position]
         position += 1
-        result |= (byte & 0x7f) << shift
+        result |= (byte & 0x7F) << shift
         shift += 7
         if not byte & 0x80:
             break
@@ -48,9 +46,7 @@ def _varint_decode(buffer, position):
 
 
 class _ProtobufCodec:
-    """
-    _ProtobufCodec encodes commands using Protobuf protocol.
-    """
+    """_ProtobufCodec encodes commands using Protobuf protocol."""
 
     @staticmethod
     def encode_commands(commands):
@@ -59,7 +55,7 @@ class _ProtobufCodec:
             # noinspection PyUnresolvedReferences
             serialized = ParseDict(command, protocol.Command()).SerializeToString()
             serialized_commands.append(_varint_encode(len(serialized)) + serialized)
-        return b''.join(serialized_commands)
+        return b"".join(serialized_commands)
 
     @staticmethod
     def decode_replies(data):
