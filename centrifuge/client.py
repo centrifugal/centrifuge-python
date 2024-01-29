@@ -14,8 +14,8 @@ from typing import (
     Optional,
     Union,
     List,
+    Callable,
 )
-from typing_extensions import Callable
 
 import websockets
 from websockets import exceptions
