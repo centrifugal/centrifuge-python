@@ -1,5 +1,3 @@
-import asyncio
-
 # Configure logging.
 import logging
 import unittest
@@ -36,7 +34,7 @@ class TestClient(unittest.IsolatedAsyncioTestCase):
                     use_protobuf=use_protobuf,
                 )
                 sub = client.new_subscription("channel")
-                asyncio.run(client.connect())
+                await client.connect()
                 await sub.subscribe()
                 await sub.ready()
                 self.assertTrue(sub.state == SubscriptionState.SUBSCRIBED)
