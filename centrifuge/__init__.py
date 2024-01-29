@@ -43,9 +43,6 @@ from .types import (
     StreamPosition,
 )
 
-__version__ = "0.3.0b0"
-
-
 __all__ = [
     "Client",
     "Subscription",

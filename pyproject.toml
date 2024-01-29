@@ -66,7 +66,7 @@ packages = ["centrifuge"]
 python = ["38", "39", "310", "311", "312"]
 
 [tool.hatch.version]
-path = "centrifuge/__init__.py"
+path = "centrifuge/__meta__.py"
 
 [tool.ruff]
 line-length = 99
