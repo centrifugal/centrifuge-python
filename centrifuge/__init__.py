@@ -1,34 +1,87 @@
-from .client import Client, Subscription, ClientState, SubscriptionState
-from .exceptions import CentrifugeException, Timeout, ClientDisconnected, \
-    SubscriptionUnsubscribed, DuplicateSubscription, ReplyError, Unauthorized
-from .contexts import SubscriptionTokenContext, ConnectionTokenContext, \
-    SubscribingContext, SubscribedContext, UnsubscribedContext, \
-    PublicationContext, JoinContext, LeaveContext, \
-    ErrorContext, DisconnectedContext, ConnectedContext, ConnectingContext, \
-    ServerSubscribedContext, ServerSubscribingContext, ServerUnsubscribedContext, \
-    ServerPublicationContext, ServerJoinContext, ServerLeaveContext, \
-    SubscriptionErrorContext
-from .types import JSON, BytesOrJSON, StreamPosition, ClientInfo, Publication, PublishResult, \
-    HistoryResult, PresenceResult, PresenceStatsResult, RpcResult
-
-
-__version__ = "0.3.0b0"
-
+"""Main module of a Centrifuge Python client library."""
+from .client import Client, ClientState, Subscription, SubscriptionState
+from .contexts import (
+    ConnectedContext,
+    ConnectingContext,
+    ConnectionTokenContext,
+    DisconnectedContext,
+    ErrorContext,
+    JoinContext,
+    LeaveContext,
+    PublicationContext,
+    ServerJoinContext,
+    ServerLeaveContext,
+    ServerPublicationContext,
+    ServerSubscribedContext,
+    ServerSubscribingContext,
+    ServerUnsubscribedContext,
+    SubscribedContext,
+    SubscribingContext,
+    SubscriptionErrorContext,
+    SubscriptionTokenContext,
+    UnsubscribedContext,
+)
+from .exceptions import (
+    CentrifugeError,
+    ClientDisconnectedError,
+    OperationTimeoutError,
+    DuplicateSubscriptionError,
+    ReplyError,
+    SubscriptionUnsubscribedError,
+    UnauthorizedError,
+)
+from .types import (
+    JSON,
+    BytesOrJSON,
+    ClientInfo,
+    HistoryResult,
+    PresenceResult,
+    PresenceStatsResult,
+    Publication,
+    PublishResult,
+    RpcResult,
+    StreamPosition,
+)
 
 __all__ = [
-    Client, Subscription, ClientState, SubscriptionState,
-
-    CentrifugeException, Timeout, ClientDisconnected, SubscriptionUnsubscribed,
-    DuplicateSubscription, ReplyError, Unauthorized,
-
-    SubscriptionTokenContext, ConnectionTokenContext,
-    SubscribingContext, SubscribedContext, UnsubscribedContext,
-    PublicationContext, JoinContext, LeaveContext,
-    ErrorContext, DisconnectedContext, ConnectedContext, ConnectingContext,
-    ServerSubscribedContext, ServerSubscribingContext, ServerUnsubscribedContext,
-    ServerPublicationContext, ServerJoinContext, ServerLeaveContext,
-    SubscriptionErrorContext,
-
-    JSON, BytesOrJSON, StreamPosition, ClientInfo, Publication, PublishResult,
-    HistoryResult, PresenceResult, PresenceStatsResult, RpcResult
+    "Client",
+    "Subscription",
+    "ClientState",
+    "SubscriptionState",
+    "CentrifugeError",
+    "OperationTimeoutError",
+    "ClientDisconnectedError",
+    "SubscriptionUnsubscribedError",
+    "DuplicateSubscriptionError",
+    "ReplyError",
+    "UnauthorizedError",
+    "SubscriptionTokenContext",
+    "ConnectionTokenContext",
+    "SubscribingContext",
+    "SubscribedContext",
+    "UnsubscribedContext",
+    "PublicationContext",
+    "JoinContext",
+    "LeaveContext",
+    "ErrorContext",
+    "DisconnectedContext",
+    "ConnectedContext",
+    "ConnectingContext",
+    "ServerSubscribedContext",
+    "ServerSubscribingContext",
+    "ServerUnsubscribedContext",
+    "ServerPublicationContext",
+    "ServerJoinContext",
+    "ServerLeaveContext",
+    "SubscriptionErrorContext",
+    "JSON",
+    "BytesOrJSON",
+    "StreamPosition",
+    "ClientInfo",
+    "Publication",
+    "PublishResult",
+    "HistoryResult",
+    "PresenceResult",
+    "PresenceStatsResult",
+    "RpcResult",
 ]

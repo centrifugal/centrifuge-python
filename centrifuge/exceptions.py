@@ -1,45 +1,33 @@
-class CentrifugeException(Exception):
-    """
-    CentrifugeException is a base exception for all other exceptions
+class CentrifugeError(Exception):
+    """CentrifugeError is a base exception for all other exceptions
     in this library.
     """
-    pass
 
 
-class ClientDisconnected(CentrifugeException):
-    """
-    ConnectionClosed raised when underlying websocket connection closed.
-    """
-    pass
+class ClientDisconnectedError(CentrifugeError):
+    """ConnectionClosed raised when underlying websocket connection closed."""
 
 
-class DuplicateSubscription(CentrifugeException):
-    """
-    DuplicateSubscription raised when trying to create a subscription for a channel which
+class DuplicateSubscriptionError(CentrifugeError):
+    """DuplicateSubscriptionError raised when trying to create a subscription for a channel which
     already has subscription in Client's internal subscription registry. Centrifuge/Centrifugo
     server does not allow subscribing on the same channel twice for the same Client.
     """
-    pass
 
 
-class SubscriptionUnsubscribed(CentrifugeException):
-    """
-    SubscriptionUnsubscribedError raised when an error subscribing on channel occurred.
-    """
-    pass
+class SubscriptionUnsubscribedError(CentrifugeError):
+    """SubscriptionUnsubscribedError raised when an error subscribing on a channel occurred."""
 
 
-class Timeout(CentrifugeException):
-    """
-    Timeout raised every time operation times out.
-    """
-    pass
+class OperationTimeoutError(CentrifugeError):
+    """OperationTimeoutError raised every time operation time out."""
 
 
-class ReplyError(CentrifugeException):
+class ReplyError(CentrifugeError):
+    """ReplyError raised when an error returned
+    from the server as a result of presence/history/publish call.
     """
-    ReplyError raised when an error returned from server as result of presence/history/publish call.
-    """
+
     def __init__(self, code: int, message: str, temporary: bool):
         self.code = code
         self.message = message
@@ -47,9 +35,7 @@ class ReplyError(CentrifugeException):
         super().__init__(f"Error {code}: {message} (temporary: {temporary})")
 
 
-class Unauthorized(CentrifugeException):
+class UnauthorizedError(CentrifugeError):
+    """UnauthorizedError may be raised from user's get_token functions to indicate
+    a client is not able to connect or subscribe.
     """
-    Unauthorized may be raised from user's get_token functions to indicate
-    client is not able to connect or subscribe.
-    """
-    pass

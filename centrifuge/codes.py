@@ -2,10 +2,10 @@ from enum import Enum
 
 
 class _ConnectingCode(Enum):
-    """
-    Known client side codes for connection moving to connecting state.
+    """Known client side codes for connection moving to connecting state.
     In most cases just for logging purposes.
     """
+
     CONNECT_CALLED = 0
     TRANSPORT_CLOSED = 1
     NO_PING = 2
@@ -14,10 +14,10 @@ class _ConnectingCode(Enum):
 
 
 class _DisconnectedCode(Enum):
-    """
-    Known client side codes for connection moving to disconnected state.
+    """Known client side codes for connection moving to disconnected state.
     In most cases just for logging purposes.
     """
+
     DISCONNECT_CALLED = 0
     UNAUTHORIZED = 1
     BAD_PROTOCOL = 2
@@ -25,29 +25,29 @@ class _DisconnectedCode(Enum):
 
 
 class _SubscribingCode(Enum):
-    """
-    Known client side codes for subscription moving to subscribing state.
+    """Known client side codes for subscription moving to subscribing state.
     In most cases just for logging purposes.
     """
+
     SUBSCRIBE_CALLED = 0
     TRANSPORT_CLOSED = 1
 
 
 class _UnsubscribedCode(Enum):
-    """
-    Known client side codes for subscription moving to unsubscribed state.
+    """Known client side codes for subscription moving to unsubscribed state.
     In most cases just for logging purposes.
     """
+
     UNSUBSCRIBE_CALLED = 0
     UNAUTHORIZED = 1
     CLIENT_CLOSED = 2
 
 
 class _ErrorCode(Enum):
-    """
-    Known client side codes for error event.
+    """Known client side codes for error event.
     In most cases just for logging purposes.
     """
+
     TIMEOUT = 1
     TRANSPORT_CLOSED = 2
     CLIENT_DISCONNECTED = 3

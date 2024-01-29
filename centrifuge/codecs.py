@@ -1,29 +1,29 @@
 import json
+from typing import Union, Iterable, AsyncIterable
 
-from google.protobuf.json_format import ParseDict
-from google.protobuf.json_format import MessageToDict
+from google.protobuf.json_format import MessageToDict, ParseDict
+from websockets.typing import Data
+
 import centrifuge.protocol.client_pb2 as protocol
 
 
 class _JsonCodec:
-    """
-    _JsonCodec is a default codec for Centrifuge library. It encodes commands using JSON.
-    """
+    """_JsonCodec is a default codec for Centrifuge library. It encodes commands using JSON."""
 
     @staticmethod
     def encode_commands(commands):
-        return '\n'.join(json.dumps(command) for command in commands)
+        return "\n".join(json.dumps(command) for command in commands)
 
     @staticmethod
     def decode_replies(data):
-        return [json.loads(reply) for reply in data.strip().split('\n')]
+        return [json.loads(reply) for reply in data.strip().split("\n")]
 
 
 def _varint_encode(number):
     """Encode an integer as a varint."""
     buffer = []
     while True:
-        towrite = number & 0x7f
+        towrite = number & 0x7F
         number >>= 7
         if number:
             buffer.append(towrite | 0x80)
@@ -33,14 +33,14 @@ def _varint_encode(number):
     return bytes(buffer)
 
 
-def _varint_decode(buffer, position):
+def _varint_decode(buffer: bytes, position: int):
     """Decode a varint from buffer starting at position."""
     result = 0
     shift = 0
     while True:
         byte = buffer[position]
         position += 1
-        result |= (byte & 0x7f) << shift
+        result |= (byte & 0x7F) << shift
         shift += 7
         if not byte & 0x80:
             break
@@ -48,21 +48,19 @@ def _varint_decode(buffer, position):
 
 
 class _ProtobufCodec:
-    """
-    _ProtobufCodec encodes commands using Protobuf protocol.
-    """
+    """_ProtobufCodec encodes commands using Protobuf protocol."""
 
     @staticmethod
-    def encode_commands(commands):
+    def encode_commands(commands: Union[Data, Iterable[Data], AsyncIterable[Data]]):
         serialized_commands = []
         for command in commands:
             # noinspection PyUnresolvedReferences
             serialized = ParseDict(command, protocol.Command()).SerializeToString()
             serialized_commands.append(_varint_encode(len(serialized)) + serialized)
-        return b''.join(serialized_commands)
+        return b"".join(serialized_commands)
 
     @staticmethod
-    def decode_replies(data):
+    def decode_replies(data: bytes):
         replies = []
         position = 0
         while position < len(data):
