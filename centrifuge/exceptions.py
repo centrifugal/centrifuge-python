@@ -19,8 +19,8 @@ class SubscriptionUnsubscribedError(CentrifugeError):
     """SubscriptionUnsubscribedError raised when an error subscribing on a channel occurred."""
 
 
-class ClientTimeoutError(CentrifugeError):
-    """ClientTimeoutError raised every time operation time out."""
+class OperationTimeoutError(CentrifugeError):
+    """OperationTimeoutError raised every time operation time out."""
 
 
 class ReplyError(CentrifugeError):

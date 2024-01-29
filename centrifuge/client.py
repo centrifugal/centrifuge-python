@@ -47,7 +47,7 @@ from centrifuge.contexts import (
 from centrifuge.exceptions import (
     CentrifugeError,
     ClientDisconnectedError,
-    ClientTimeoutError,
+    OperationTimeoutError,
     DuplicateSubscriptionError,
     ReplyError,
     SubscriptionUnsubscribedError,
@@ -318,7 +318,7 @@ class Client:
 
             try:
                 reply = await future
-            except ClientTimeoutError as e:
+            except OperationTimeoutError as e:
                 await self._close_transport_conn()
                 handler = self._events.on_error
                 await handler(ErrorContext(code=_code_number(_ErrorCode.TIMEOUT), error=e))
@@ -601,7 +601,7 @@ class Client:
             await self._send_commands([command])
             try:
                 reply = await future
-            except ClientTimeoutError as e:
+            except OperationTimeoutError as e:
                 if sub.state != SubscriptionState.SUBSCRIBING:
                     return None
                 handler = sub._events.on_error
@@ -670,7 +670,7 @@ class Client:
 
         try:
             await future
-        except ClientTimeoutError:
+        except OperationTimeoutError:
             code = _ConnectingCode.UNSUBSCRIBE_ERROR
             await self._disconnect(_code_number(code), _code_message(code), True)
             return
@@ -683,7 +683,7 @@ class Client:
 
             def cb():
                 if not future.done():
-                    self._future_error(cmd_id, ClientTimeoutError())
+                    self._future_error(cmd_id, OperationTimeoutError())
 
             th = self._loop.call_later(timeout, cb)
 
@@ -710,7 +710,7 @@ class Client:
 
             def cb():
                 if not future.done():
-                    self._future_error(cmd_id, ClientTimeoutError())
+                    self._future_error(cmd_id, OperationTimeoutError())
 
             th = self._loop.call_later(timeout, cb)
 
@@ -784,7 +784,7 @@ class Client:
             timeout=timeout or self._timeout,
         )
         if not completed:
-            raise ClientTimeoutError("timeout waiting for connection to be ready")
+            raise OperationTimeoutError("timeout waiting for connection to be ready")
 
     async def publish(
         self,
@@ -1239,7 +1239,7 @@ class Subscription:
             timeout=timeout or self._client._timeout,
         )
         if not completed:
-            raise ClientTimeoutError("timeout waiting for subscription to be ready")
+            raise OperationTimeoutError("timeout waiting for subscription to be ready")
 
     async def history(
         self,

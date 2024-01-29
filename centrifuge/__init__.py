@@ -24,7 +24,7 @@ from .contexts import (
 from .exceptions import (
     CentrifugeError,
     ClientDisconnectedError,
-    ClientTimeoutError,
+    OperationTimeoutError,
     DuplicateSubscriptionError,
     ReplyError,
     SubscriptionUnsubscribedError,
@@ -49,7 +49,7 @@ __all__ = [
     "ClientState",
     "SubscriptionState",
     "CentrifugeError",
-    "ClientTimeoutError",
+    "OperationTimeoutError",
     "ClientDisconnectedError",
     "SubscriptionUnsubscribedError",
     "DuplicateSubscriptionError",
