@@ -2,12 +2,23 @@ import asyncio
 import base64
 import contextlib
 import logging
+from asyncio import TimerHandle
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Dict,
+    Optional,
+    Union,
+    List,
+)
+from typing_extensions import Callable
 
 import websockets
+from websockets import exceptions
 from websockets.protocol import State
 
 from centrifuge.codecs import _JsonCodec, _ProtobufCodec
@@ -27,11 +38,6 @@ from centrifuge.contexts import (
     JoinContext,
     LeaveContext,
     PublicationContext,
-    ServerJoinContext,
-    ServerLeaveContext,
-    ServerPublicationContext,
-    ServerSubscribedContext,
-    ServerUnsubscribedContext,
     SubscribedContext,
     SubscribingContext,
     SubscriptionErrorContext,
@@ -47,7 +53,10 @@ from centrifuge.exceptions import (
     SubscriptionUnsubscribedError,
     UnauthorizedError,
 )
-from centrifuge.handlers import _ConnectionEventHandler, _SubscriptionEventHandler
+from centrifuge.handlers import (
+    ConnectionEventHandler,
+    SubscriptionEventHandler,
+)
 from centrifuge.types import (
     BytesOrJSON,
     ClientInfo,
@@ -104,8 +113,9 @@ class Client:
 
     def __init__(
         self,
-        address,
+        address: str,
         token: str = "",
+        events: Optional[ConnectionEventHandler] = None,
         get_token: Optional[Callable[[ConnectionTokenContext], Awaitable[str]]] = None,
         use_protobuf: bool = False,
         timeout: float = 5.0,
@@ -128,9 +138,12 @@ class Client:
         """
         self.state: ClientState = ClientState.DISCONNECTED
         self._address = address
-        self._events = _ConnectionEventHandler()
+        self._events = events or ConnectionEventHandler()
         self._use_protobuf = use_protobuf
-        self._codec = _ProtobufCodec if use_protobuf else _JsonCodec
+        self._codec: Union[
+            _ProtobufCodec,
+            _JsonCodec,
+        ] = _ProtobufCodec() if use_protobuf else _JsonCodec()
         self._conn: Optional["WebSocketClientProtocol"] = None
         self._id: int = 0
         self._subs: Dict[str, Subscription] = {}
@@ -158,46 +171,6 @@ class Client:
         self._reconnect_attempts = 0
         self._reconnect_timer = None
 
-    def on_connecting(self, handler: Callable[[ConnectingContext], Awaitable[None]]):
-        """Allows setting a callback for connecting event."""
-        self._events.on_connecting = handler
-
-    def on_connected(self, handler: Callable[[ConnectedContext], Awaitable[None]]):
-        """Allows setting a callback for connected event."""
-        self._events.on_connected = handler
-
-    def on_disconnected(self, handler: Callable[[DisconnectedContext], Awaitable[None]]):
-        """Allows setting a callback for disconnected event."""
-        self._events.on_disconnected = handler
-
-    def on_error(self, handler: Callable[[ErrorContext], Awaitable[None]]):
-        """Allows setting a callback for error event."""
-        self._events.on_error = handler
-
-    def on_subscribing(self, handler: Callable[[ServerSubscribedContext], Awaitable[None]]):
-        """Allows setting a callback for server-side subscriptions subscribing event."""
-        self._events.on_subscribing = handler
-
-    def on_subscribed(self, handler: Callable[[ServerSubscribedContext], Awaitable[None]]):
-        """Allows setting a callback for server-side subscriptions subscribed event."""
-        self._events.on_subscribed = handler
-
-    def on_unsubscribed(self, handler: Callable[[ServerUnsubscribedContext], Awaitable[None]]):
-        """Allows setting a callback for server-side subscriptions unsubscribed event."""
-        self._events.on_unsubscribed = handler
-
-    def on_publication(self, handler: Callable[[ServerPublicationContext], Awaitable[None]]):
-        """Allows setting a callback for publications coming from server-side subscriptions."""
-        self._events.on_publication = handler
-
-    def on_join(self, handler: Callable[[ServerJoinContext], Awaitable[None]]):
-        """Allows setting a callback for join messages coming from server-side subscriptions."""
-        self._events.on_join = handler
-
-    def on_leave(self, handler: Callable[[ServerLeaveContext], Awaitable[None]]):
-        """Allows setting a callback for leave messages coming from server-side subscriptions."""
-        self._events.on_leave = handler
-
     def subscriptions(self) -> Dict[str, "Subscription"]:
         """Returns a copy of subscriptions dict."""
         return self._subs.copy()
@@ -206,6 +179,7 @@ class Client:
         self,
         channel: str,
         token: str = "",
+        events: Optional[SubscriptionEventHandler] = None,
         get_token: Optional[Callable[[SubscriptionTokenContext], Awaitable[str]]] = None,
         min_resubscribe_delay=0.1,
         max_resubscribe_delay=10.0,
@@ -220,6 +194,7 @@ class Client:
         sub = Subscription._create_instance(
             self,
             channel,
+            events=events,
             token=token,
             get_token=get_token,
             min_resubscribe_delay=min_resubscribe_delay,
@@ -249,13 +224,13 @@ class Client:
         sub._client = None
         del self._subs[sub.channel]
 
-    async def _close_transport_conn(self):
+    async def _close_transport_conn(self) -> None:
         if not self._conn:
             return
         with contextlib.suppress(websockets.ConnectionClosed):
             await self._conn.close()
 
-    async def _schedule_reconnect(self):
+    async def _schedule_reconnect(self) -> None:
         if self.state == ClientState.CONNECTED:
             return
 
@@ -280,12 +255,12 @@ class Client:
             lambda: asyncio.ensure_future(self._reconnect()),
         )
 
-    async def _reconnect(self):
+    async def _reconnect(self) -> None:
         if self.state != ClientState.CONNECTING:
             return
         await self._create_connection()
 
-    def _next_command_id(self):
+    def _next_command_id(self) -> int:
         self._id += 1
         return self._id
 
@@ -422,14 +397,14 @@ class Client:
                         continue
                     asyncio.ensure_future(self._subscribe(channel))
 
-    def _clear_connecting_state(self):
+    def _clear_connecting_state(self) -> None:
         self._reconnect_attempts = 0
         if self._reconnect_timer:
             logger.debug("clear reconnect timer")
             self._reconnect_timer.cancel()
             self._reconnect_timer = None
 
-    async def connect(self):
+    async def connect(self) -> None:
         """Initiate connection to server."""
         if self.state in (ClientState.CONNECTING, ClientState.CONNECTED):
             return
@@ -443,7 +418,7 @@ class Client:
         await handler(ConnectingContext(code=_code_number(code), reason=_code_message(code)))
         await self._create_connection()
 
-    async def disconnect(self):
+    async def disconnect(self) -> None:
         """Disconnect from server."""
         if self.state == ClientState.DISCONNECTED:
             return
@@ -451,7 +426,7 @@ class Client:
         code = _DisconnectedCode.DISCONNECT_CALLED
         await self._disconnect(_code_number(code), _code_message(code), False)
 
-    async def _refresh(self):
+    async def _refresh(self) -> None:
         cmd_id = self._next_command_id()
 
         try:
@@ -516,7 +491,7 @@ class Client:
         except Exception as e:
             if isinstance(e, UnauthorizedError):
                 code = _UnsubscribedCode.UNAUTHORIZED
-                await sub.move_unsubscribed(
+                await sub._move_unsubscribed(
                     _code_number(code),
                     _code_message(code),
                     send_unsubscribe_command=True,
@@ -602,7 +577,7 @@ class Client:
             except Exception as e:
                 if isinstance(e, UnauthorizedError):
                     code = _UnsubscribedCode.UNAUTHORIZED
-                    await sub.move_unsubscribed(_code_number(code), _code_message(code))
+                    await sub._move_unsubscribed(_code_number(code), _code_message(code))
                     return False
                 handler = sub._events.on_error
                 await handler(
@@ -667,13 +642,10 @@ class Client:
                             error=ReplyError(code, message, temporary),
                         ),
                     )
-                    # noinspection PyProtectedMember
                     await sub._schedule_resubscribe()
                 else:
-                    # noinspection PyProtectedMember
-                    await sub.move_unsubscribed(code, message)
+                    await sub._move_unsubscribed(code, message)
             else:
-                # noinspection PyProtectedMember
                 await sub._move_subscribed(reply["subscribe"])
 
     async def resubscribe(self, sub: "Subscription"):
@@ -801,12 +773,12 @@ class Client:
             return data
 
     @staticmethod
-    def _check_reply_error(reply):
+    def _check_reply_error(reply) -> None:
         if reply.get("error"):
             error = reply["error"]
             raise ReplyError(error["code"], error["message"], error.get("temporary", False))
 
-    async def ready(self, timeout=None):
+    async def ready(self, timeout: Optional[float] = None) -> None:
         completed = await _wait_for_future(
             self._connected_future,
             timeout=timeout or self._timeout,
@@ -814,7 +786,12 @@ class Client:
         if not completed:
             raise ClientTimeoutError("timeout waiting for connection to be ready")
 
-    async def publish(self, channel: str, data: BytesOrJSON, timeout=None) -> PublishResult:
+    async def publish(
+        self,
+        channel: str,
+        data: BytesOrJSON,
+        timeout: Optional[float] = None,
+    ) -> PublishResult:
         await self.ready()
 
         cmd_id = self._next_command_id()
@@ -835,9 +812,9 @@ class Client:
         self,
         channel: str,
         limit: int = 0,
-        since: StreamPosition = None,
+        since: Optional[StreamPosition] = None,
         reverse: bool = False,
-        timeout=None,
+        timeout: Optional[float] = None,
     ) -> HistoryResult:
         await self.ready()
 
@@ -880,7 +857,7 @@ class Client:
             publications=publications,
         )
 
-    async def presence(self, channel: str, timeout=None) -> PresenceResult:
+    async def presence(self, channel: str, timeout: Optional[float] = None) -> PresenceResult:
         await self.ready()
 
         cmd_id = self._next_command_id()
@@ -908,7 +885,11 @@ class Client:
             clients=clients,
         )
 
-    async def presence_stats(self, channel: str, timeout=None) -> PresenceStatsResult:
+    async def presence_stats(
+        self,
+        channel: str,
+        timeout: Optional[float] = None,
+    ) -> PresenceStatsResult:
         await self.ready()
 
         cmd_id = self._next_command_id()
@@ -927,7 +908,12 @@ class Client:
             num_users=reply["presence_stats"].get("num_users", 0),
         )
 
-    async def rpc(self, method: str, data: BytesOrJSON, timeout=None) -> RpcResult:
+    async def rpc(
+        self,
+        method: str,
+        data: BytesOrJSON,
+        timeout: Optional[float] = None,
+    ) -> RpcResult:
         await self.ready()
 
         cmd_id = self._next_command_id()
@@ -946,7 +932,7 @@ class Client:
             data=self._decode_data(reply["rpc"].get("data")),
         )
 
-    def _clear_outgoing_futures(self):
+    def _clear_outgoing_futures(self) -> None:
         command_ids = []
         for cmd_id in self._futures:
             command_ids.append(cmd_id)
@@ -956,7 +942,7 @@ class Client:
                 ClientDisconnectedError(f"command {cmd_id} canceled due to disconnect"),
             )
 
-    async def _disconnect(self, code: int, reason: str, reconnect: bool):
+    async def _disconnect(self, code: int, reason: str, reconnect: bool) -> None:
         if self._ping_timer:
             logger.debug("canceling ping timer")
             self._ping_timer.cancel()
@@ -1005,21 +991,20 @@ class Client:
                 )
 
         handler = self._events.on_disconnected
-        if handler:
-            await handler(DisconnectedContext(code=code, reason=reason))
+        await handler(DisconnectedContext(code=code, reason=reason))
 
         if reconnect:
             asyncio.ensure_future(self._schedule_reconnect())
 
-    async def _consume_connected_future(self):
+    async def _consume_connected_future(self) -> None:
         with contextlib.suppress(CentrifugeError):
             await self._connected_future
 
-    async def _no_ping(self):
+    async def _no_ping(self) -> None:
         code = _ConnectingCode.NO_PING
         await self._disconnect(_code_number(code), _code_message(code), True)
 
-    def _restart_ping_wait(self):
+    def _restart_ping_wait(self) -> None:
         if self._ping_timer:
             self._ping_timer.cancel()
         self._ping_timer = self._loop.call_later(
@@ -1027,40 +1012,45 @@ class Client:
             lambda: asyncio.ensure_future(self._no_ping(), loop=self._loop),
         )
 
-    async def _handle_ping(self):
+    async def _handle_ping(self) -> None:
         logger.debug("received ping from server")
         if self._send_pong:
             logger.debug("respond with pong")
             await self._send_commands([{}])
         self._restart_ping_wait()
 
-    async def _send_commands(self, commands):
+    async def _send_commands(
+        self,
+        commands: Union[List[Dict[str, Any]]],
+    ) -> None:
+        if self._conn is None:
+            raise CentrifugeError("connection is not initialized")
         logger.debug("send commands: %s", str(commands))
         commands = self._codec.encode_commands(commands)
         try:
             await self._conn.send(commands)
-        except websockets.ConnectionClosed:
+        except exceptions.ConnectionClosed:
             code = _ConnectingCode.TRANSPORT_CLOSED
             await self._disconnect(_code_number(code), _code_message(code), True)
 
-    async def _process_unsubscribe(self, channel: str, unsubscribe: dict):
+    async def _process_unsubscribe(self, channel: str, unsubscribe: Dict[str, Any]) -> None:
         sub = self._subs.get(channel, None)
         if not sub:
             return
 
         code = unsubscribe["code"]
         if code < 2500:
-            asyncio.ensure_future(sub.move_unsubscribed(code, unsubscribe["reason"]))
+            asyncio.ensure_future(sub._move_unsubscribed(code, unsubscribe["reason"]))
         else:
             asyncio.ensure_future(sub.move_subscribing(code, unsubscribe["reason"]))
 
-    async def _process_disconnect(self, disconnect):
+    async def _process_disconnect(self, disconnect: Dict[str, Any]) -> None:
         logger.debug("disconnect push received")
         code = disconnect["code"]
         reconnect = (3500 <= code < 4000) or (4500 <= code < 5000)
         await self._disconnect(code, disconnect["reason"], reconnect)
 
-    async def _process_reply(self, reply):
+    async def _process_reply(self, reply: Dict[str, Any]) -> None:
         if reply.get("id", 0) > 0:
             await self._future_success(reply["id"], reply)
         elif reply.get("push"):
@@ -1081,7 +1071,7 @@ class Client:
         else:
             await self._handle_ping()
 
-    async def _process_publication(self, channel: str, pub: Any):
+    async def _process_publication(self, channel: str, pub: Any) -> None:
         sub = self._subs.get(channel, None)
         if not sub:
             return
@@ -1099,7 +1089,7 @@ class Client:
             ),
         )
 
-    async def _process_join(self, channel: str, join: Any):
+    async def _process_join(self, channel: str, join: Any) -> None:
         sub = self._subs.get(channel, None)
         if not sub:
             return
@@ -1107,7 +1097,7 @@ class Client:
         client_info = self._extract_client_info(join["info"])
         await sub._events.on_join(JoinContext(info=client_info))
 
-    async def _process_leave(self, channel: str, leave: Any):
+    async def _process_leave(self, channel: str, leave: Any) -> None:
         sub = self._subs.get(channel, None)
         if not sub:
             return
@@ -1115,7 +1105,7 @@ class Client:
         client_info = self._extract_client_info(leave["info"])
         await sub._events.on_leave(LeaveContext(info=client_info))
 
-    def _extract_client_info(self, info: Any):
+    def _extract_client_info(self, info: Any) -> ClientInfo:
         return ClientInfo(
             client=info.get("client", ""),
             user=info.get("user", ""),
@@ -1123,7 +1113,7 @@ class Client:
             chan_info=self._decode_data(info.get("chan_info", None)),
         )
 
-    async def _process_incoming_data(self, message):
+    async def _process_incoming_data(self, message: bytes) -> None:
         logger.debug("start parsing message: %s", str(message))
         replies = self._codec.decode_replies(message)
         logger.debug("got %d replies", len(replies))
@@ -1131,7 +1121,7 @@ class Client:
             logger.debug("got reply %s", str(reply))
             await self._process_reply(reply)
 
-    async def _process_messages(self):
+    async def _process_messages(self) -> None:
         logger.debug("start message processing routine")
         while True:
             if self._messages:
@@ -1142,15 +1132,18 @@ class Client:
                 await self._process_incoming_data(message)
         logger.debug("stop message processing routine")
 
-    async def _listen(self):
+    async def _listen(self) -> None:
         logger.debug("start reading connection")
+        if self._conn is None:
+            raise CentrifugeError("connection is not initialized")
+
         while self._conn.open:
             try:
                 result = await self._conn.recv()
                 if result:
                     logger.debug("data received %s", result)
                     await self._messages.put(result)
-            except websockets.ConnectionClosed:
+            except exceptions.ConnectionClosed:
                 break
 
         logger.debug("stop reading connection")
@@ -1182,20 +1175,25 @@ class Client:
 
 
 class Subscription:
-    """Subscription describes client subscription to a channel. It can be in one of 3 states:
+    """
+    Subscription describes client subscription to a channel.
+
+    It can be in one of three states:
         - unsubscribed (initial state, or after unsubscribe called, or terminal unsubscribe code
                         received from server)
         - subscribing (when subscribe called, or when automatic re-subscription is in progress)
-        - subscribed (after successful subscribe)
+        - subscribed (after successfully subscribe)
 
-    See more details about subscriptions behaviour in https://centrifugal.dev/docs/transports/client_api.
+    See more details about subscription behaviour in
+    https://centrifugal.dev/docs/transports/client_api.
     """
 
     _resubscribe_backoff_factor = 2
     _resubscribe_backoff_jitter = 0.5
 
-    def __init__(self):
-        self.state = None  # Required to make PyCharm linting happy.
+    def __init__(self) -> None:
+        self.state: SubscriptionState = SubscriptionState.UNSUBSCRIBED
+        # Required to make PyCharm linting happy.
         raise CentrifugeError(
             "do not create Subscription instances directly, use Client.new_subscription method",
         )
@@ -1205,57 +1203,37 @@ class Subscription:
         client: Client,
         channel: str,
         token: str = "",
+        events: Optional[SubscriptionEventHandler] = None,
         get_token: Optional[Callable[[SubscriptionTokenContext], Awaitable[str]]] = None,
-        min_resubscribe_delay=0.1,
-        max_resubscribe_delay=10.0,
-    ):
+        min_resubscribe_delay: float = 0.1,
+        max_resubscribe_delay: float = 10.0,
+    ) -> None:
         """Initializes Subscription instance.
         Note: use Client.new_subscription method to create new subscriptions in your app.
         """
         self.channel = channel
-        self.state: SubscriptionState = SubscriptionState.UNSUBSCRIBED
+        self.state = SubscriptionState.UNSUBSCRIBED
         # Optimistically keep future unresolved for newly created instance
         # despite Subscription is in UNSUBSCRIBED state.
-        self._subscribed_future = asyncio.Future()
+        self._subscribed_future: asyncio.Future[bool] = asyncio.Future()
         self._subscribed = False
         self._client = client
-        self._events = _SubscriptionEventHandler()
+        self._events = events or SubscriptionEventHandler()
         self._token = token
         self._get_token = get_token
         self._min_resubscribe_delay = min_resubscribe_delay
         self._max_resubscribe_delay = max_resubscribe_delay
         self._resubscribe_attempts = 0
-        self._refresh_timer = None
-        self._resubscribe_timer = None
+        self._refresh_timer: Optional[TimerHandle] = None
+        self._resubscribe_timer: Optional[TimerHandle] = None
 
     @classmethod
-    def _create_instance(cls, *args, **kwargs):
+    def _create_instance(cls, *args: Any, **kwargs: Any) -> "Subscription":
         obj = cls.__new__(cls)
         obj._initialize(*args, **kwargs)
         return obj
 
-    def on_subscribing(self, handler: Callable[[SubscribingContext], Awaitable[None]]):
-        self._events.on_subscribing = handler
-
-    def on_subscribed(self, handler: Callable[[SubscribedContext], Awaitable[None]]):
-        self._events.on_subscribed = handler
-
-    def on_unsubscribed(self, handler: Callable[[UnsubscribedContext], Awaitable[None]]):
-        self._events.on_unsubscribed = handler
-
-    def on_publication(self, handler: Callable[[PublicationContext], Awaitable[None]]):
-        self._events.on_publication = handler
-
-    def on_join(self, handler: Callable[[JoinContext], Awaitable[None]]):
-        self._events.on_join = handler
-
-    def on_leave(self, handler: Callable[[LeaveContext], Awaitable[None]]):
-        self._events.on_leave = handler
-
-    def on_error(self, handler: Callable[[SubscriptionErrorContext], Awaitable[None]]):
-        self._events.on_error = handler
-
-    async def ready(self, timeout=None):
+    async def ready(self, timeout: Optional[float] = None) -> None:
         completed = await _wait_for_future(
             self._subscribed_future,
             timeout=timeout or self._client._timeout,
@@ -1266,12 +1244,11 @@ class Subscription:
     async def history(
         self,
         limit: int = 0,
-        since: StreamPosition = None,
+        since: Optional[StreamPosition] = None,
         reverse: bool = False,
-        timeout=None,
+        timeout: Optional[float] = None,
     ) -> HistoryResult:
         await self.ready(timeout=timeout)
-        # noinspection PyProtectedMember
         return await self._client.history(
             self.channel,
             limit=limit,
@@ -1280,22 +1257,22 @@ class Subscription:
             timeout=timeout,
         )
 
-    async def presence(self, timeout=None) -> PresenceResult:
+    async def presence(self, timeout: Optional[float] = None) -> PresenceResult:
         await self.ready(timeout=timeout)
         # noinspection PyProtectedMember
         return await self._client.presence(self.channel, timeout=timeout)
 
-    async def presence_stats(self, timeout=None) -> PresenceStatsResult:
+    async def presence_stats(self, timeout: Optional[float] = None) -> PresenceStatsResult:
         await self.ready(timeout=timeout)
         # noinspection PyProtectedMember
         return await self._client.presence_stats(self.channel, timeout=timeout)
 
-    async def publish(self, data: BytesOrJSON, timeout=None) -> PublishResult:
+    async def publish(self, data: BytesOrJSON, timeout: Optional[float] = None) -> PublishResult:
         await self.ready(timeout=timeout)
         # noinspection PyProtectedMember
         return await self._client.publish(self.channel, data, timeout=timeout)
 
-    async def subscribe(self):
+    async def subscribe(self) -> None:
         if self.state == SubscriptionState.SUBSCRIBING:
             return
 
@@ -1305,31 +1282,35 @@ class Subscription:
         code = _SubscribingCode.SUBSCRIBE_CALLED
         await handler(SubscribingContext(code=_code_number(code), reason=_code_message(code)))
 
-        # noinspection PyProtectedMember
         await self._client.resubscribe(self)
 
-    async def unsubscribe(self):
+    async def unsubscribe(self) -> None:
         code = _UnsubscribedCode.UNSUBSCRIBE_CALLED
-        await self.move_unsubscribed(
+        await self._move_unsubscribed(
             code=_code_number(code),
             reason=_code_message(code),
             send_unsubscribe_command=True,
         )
 
-    def _clear_subscribed_state(self):
+    def _clear_subscribed_state(self) -> None:
         if self._refresh_timer:
             logger.debug("canceling refresh timer for %s", self.channel)
             self._refresh_timer.cancel()
             self._refresh_timer = None
 
-    def _clear_subscribing_state(self):
+    def _clear_subscribing_state(self) -> None:
         self._resubscribe_attempts = 0
         if self._resubscribe_timer:
             logger.debug("canceling resubscribe timer for %s", self.channel)
             self._resubscribe_timer.cancel()
             self._resubscribe_timer = None
 
-    async def move_unsubscribed(self, code: int, reason: str, send_unsubscribe_command=False):
+    async def _move_unsubscribed(
+        self,
+        code: int,
+        reason: str,
+        send_unsubscribe_command: bool = False,
+    ) -> None:
         if self.state == SubscriptionState.UNSUBSCRIBED:
             return
 
@@ -1359,11 +1340,16 @@ class Subscription:
             # noinspection PyProtectedMember
             await self._client._unsubscribe(self.channel)
 
-    async def _consume_subscribed_future(self):
+    async def _consume_subscribed_future(self) -> None:
         with contextlib.suppress(CentrifugeError):
             await self._subscribed_future
 
-    async def move_subscribing(self, code: int, reason: str, skip_schedule_resubscribe=False):
+    async def move_subscribing(
+        self,
+        code: int,
+        reason: str,
+        skip_schedule_resubscribe: bool = False,
+    ) -> None:
         if self.state == SubscriptionState.SUBSCRIBING:
             return
 
@@ -1385,10 +1371,10 @@ class Subscription:
         if not skip_schedule_resubscribe:
             asyncio.ensure_future(self._client.resubscribe(self))
 
-    async def _move_subscribed(self, subscribe):
+    async def _move_subscribed(self, subscribe: Dict[str, Any]) -> None:
         self.state = SubscriptionState.SUBSCRIBED
         self._subscribed_future.set_result(True)
-        handler = self._events.on_subscribed
+        on_subscribed_handler = self._events.on_subscribed
         recoverable = subscribe.get("recoverable", False)
         positioned = subscribe.get("positioned", False)
         stream_position = None
@@ -1406,7 +1392,7 @@ class Subscription:
                 lambda: asyncio.ensure_future(self._refresh(), loop=self._client._loop),
             )
 
-        await handler(
+        await on_subscribed_handler(
             SubscribedContext(
                 channel=self.channel,
                 recoverable=recoverable,
@@ -1420,11 +1406,11 @@ class Subscription:
 
         publications = subscribe.get("publications", [])
         if publications:
-            handler = self._events.on_publication
+            on_publication_handler = self._events.on_publication
             for pub in publications:
                 info = pub.get("info", None)
                 client_info = self._client._extract_client_info(info) if info else None
-                await handler(
+                await on_publication_handler(
                     PublicationContext(
                         pub=Publication(
                             offset=pub.get("offset", 0),
@@ -1436,12 +1422,12 @@ class Subscription:
 
         self._clear_subscribing_state()
 
-    async def _refresh(self):
+    async def _refresh(self) -> None:
         if self.state != SubscriptionState.SUBSCRIBED:
             return
         await self._client._sub_refresh(self.channel)
 
-    async def _schedule_resubscribe(self):
+    async def _schedule_resubscribe(self) -> None:
         if self.state != SubscriptionState.SUBSCRIBING:
             return
 
@@ -1457,8 +1443,7 @@ class Subscription:
             lambda: asyncio.ensure_future(self._resubscribe()),
         )
 
-    async def _resubscribe(self):
+    async def _resubscribe(self) -> None:
         if self.state != SubscriptionState.SUBSCRIBING:
             return
-        # noinspection PyProtectedMember
         await self._client.resubscribe(self)

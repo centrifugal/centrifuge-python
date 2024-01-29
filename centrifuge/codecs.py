@@ -1,6 +1,8 @@
 import json
+from typing import Union, Iterable, AsyncIterable
 
 from google.protobuf.json_format import MessageToDict, ParseDict
+from websockets.typing import Data
 
 import centrifuge.protocol.client_pb2 as protocol
 
@@ -31,7 +33,7 @@ def _varint_encode(number):
     return bytes(buffer)
 
 
-def _varint_decode(buffer, position):
+def _varint_decode(buffer: bytes, position: int):
     """Decode a varint from buffer starting at position."""
     result = 0
     shift = 0
@@ -49,7 +51,7 @@ class _ProtobufCodec:
     """_ProtobufCodec encodes commands using Protobuf protocol."""
 
     @staticmethod
-    def encode_commands(commands):
+    def encode_commands(commands: Union[Data, Iterable[Data], AsyncIterable[Data]]):
         serialized_commands = []
         for command in commands:
             # noinspection PyUnresolvedReferences
@@ -58,7 +60,7 @@ class _ProtobufCodec:
         return b"".join(serialized_commands)
 
     @staticmethod
-    def decode_replies(data):
+    def decode_replies(data: bytes):
         replies = []
         position = 0
         while position < len(data):
