@@ -37,12 +37,12 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -e .[dev]
+          make dev
 
       - name: Run tests
         run: |
-          python -m unittest discover -s tests
+          make test
 
       - name: Run linter
         run: |
-          ruff . --output-format=github
+          make lint-ci

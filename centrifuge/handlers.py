@@ -19,8 +19,8 @@ from centrifuge.contexts import (
 )
 
 
-class ConnectionEventHandler:
-    """ConnectionEventHandler is a set of callbacks called on various client events."""
+class ClientEventHandler:
+    """ClientEventHandler is a set of callbacks called on various Client-level events."""
 
     async def on_connecting(self, ctx: ConnectingContext):
         """Called when connecting. This may be initial connecting, or
@@ -56,7 +56,8 @@ class ConnectionEventHandler:
 
 
 class SubscriptionEventHandler:
-    """SubscriptionEventHandler is a set of callbacks called on various subscription events."""
+    """SubscriptionEventHandler is a set of callbacks called on various
+    Subscription-level events."""
 
     async def on_subscribing(self, ctx: SubscribingContext) -> None:
         """Called when subscribing. This may be initial subscribing attempt,

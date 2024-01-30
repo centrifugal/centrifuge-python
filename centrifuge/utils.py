@@ -9,11 +9,12 @@ MAX_STEP = 31
 
 def _backoff(step: int, min_value: float, max_value: float) -> float:
     """Implements exponential backoff with jitter.
-    Using full jitter technique - see https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
+    Using full jitter technique - see
+    https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
     """
     if step > MAX_STEP:
         step = MAX_STEP
-    interval = random.uniform(0, min(max_value, min_value * 2**step))
+    interval = random.uniform(0, min(max_value, min_value * 2**step))  # noqa: S311
     return min(max_value, min_value + interval)
 
 

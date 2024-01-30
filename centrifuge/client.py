@@ -54,7 +54,7 @@ from centrifuge.exceptions import (
     UnauthorizedError,
 )
 from centrifuge.handlers import (
-    ConnectionEventHandler,
+    ClientEventHandler,
     SubscriptionEventHandler,
 )
 from centrifuge.types import (
@@ -83,7 +83,7 @@ logger = logging.getLogger("centrifuge")
 
 
 class ClientState(Enum):
-    """ClientState represents possible states of client connection."""
+    """ClientState represents possible states of Client connection."""
 
     DISCONNECTED = "disconnected"
     CONNECTING = "connecting"
@@ -91,7 +91,7 @@ class ClientState(Enum):
 
 
 class SubscriptionState(Enum):
-    """SubscriptionState represents possible states of subscription."""
+    """SubscriptionState represents possible states of Subscription."""
 
     UNSUBSCRIBED = "unsubscribed"
     SUBSCRIBING = "subscribing"
@@ -115,7 +115,7 @@ class Client:
         self,
         address: str,
         token: str = "",
-        events: Optional[ConnectionEventHandler] = None,
+        events: Optional[ClientEventHandler] = None,
         get_token: Optional[Callable[[ConnectionTokenContext], Awaitable[str]]] = None,
         use_protobuf: bool = False,
         timeout: float = 5.0,
@@ -138,7 +138,7 @@ class Client:
         """
         self.state: ClientState = ClientState.DISCONNECTED
         self._address = address
-        self._events = events or ConnectionEventHandler()
+        self._events = events or ClientEventHandler()
         self._use_protobuf = use_protobuf
         self._codec: Union[
             _ProtobufCodec,
@@ -406,7 +406,7 @@ class Client:
 
     async def connect(self) -> None:
         """Initiate connection to server."""
-        if self.state in (ClientState.CONNECTING, ClientState.CONNECTED):
+        if self.state in {ClientState.CONNECTING, ClientState.CONNECTED}:
             return
 
         self.state = ClientState.CONNECTING
@@ -569,7 +569,7 @@ class Client:
 
         subscribe = {"channel": channel}
 
-        if sub._token != "":
+        if sub._token:
             subscribe["token"] = sub._token
         elif sub._get_token:
             try:
@@ -1192,8 +1192,9 @@ class Subscription:
     _resubscribe_backoff_jitter = 0.5
 
     def __init__(self) -> None:
+        # Some definitions required to make PyCharm linting happy.
         self.state: SubscriptionState = SubscriptionState.UNSUBSCRIBED
-        # Required to make PyCharm linting happy.
+        self._subscribed_future = None
         raise CentrifugeError(
             "do not create Subscription instances directly, use Client.new_subscription method",
         )
@@ -1400,7 +1401,7 @@ class Subscription:
                 stream_position=stream_position,
                 was_recovering=subscribe.get("was_recovering", False),
                 recovered=subscribe.get("recovered", False),
-                data=self._client._decode_data(subscribe.get("data", None)),
+                data=self._client._decode_data(subscribe.get("data")),
             ),
         )
 

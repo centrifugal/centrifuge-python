@@ -33,7 +33,7 @@ And then:
 ```bash
 python -m venv env
 . env/bin/activate
-pip install -r requirements.txt
+make dev
 python -m unittest discover -s tests
 ```
 
@@ -65,6 +65,6 @@ And then:
 ```bash
 python -m venv env
 . env/bin/activate
-pip install -r requirements.txt
+make dev
 python example.py
 ```
