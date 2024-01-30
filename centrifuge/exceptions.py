@@ -5,27 +5,31 @@ class CentrifugeError(Exception):
 
 
 class ClientDisconnectedError(CentrifugeError):
-    """ConnectionClosed raised when underlying websocket connection closed."""
+    """ClientDisconnectedError may be raised when presence/presence_stats/history/publish/rpc
+    operations are attempted on a Client in DISCONNECTED state."""
 
 
 class DuplicateSubscriptionError(CentrifugeError):
-    """DuplicateSubscriptionError raised when trying to create a subscription for a channel which
-    already has subscription in Client's internal subscription registry. Centrifuge/Centrifugo
-    server does not allow subscribing on the same channel twice for the same Client.
+    """DuplicateSubscriptionError raised when trying to create a Subscription for
+    a channel which already has subscription in Client's internal subscription registry.
+    Centrifuge/Centrifugo server does not allow subscribing on the same channel twice
+    for the same Client instance.
     """
 
 
 class SubscriptionUnsubscribedError(CentrifugeError):
-    """SubscriptionUnsubscribedError raised when an error subscribing on a channel occurred."""
+    """SubscriptionUnsubscribedError may be raised when presence/presence_stats/history/publish/rpc
+    operations are attempted on a Subscription in UNSUBSCRIBED state."""
 
 
 class OperationTimeoutError(CentrifugeError):
-    """OperationTimeoutError raised every time operation time out."""
+    """OperationTimeoutError raised when presence/presence_stats/history/publish/rpc operations
+    timing out."""
 
 
 class ReplyError(CentrifugeError):
     """ReplyError raised when an error returned
-    from the server as a result of presence/history/publish call.
+    from the server as a result of presence/presence_stats/history/publish/rpc calls.
     """
 
     def __init__(self, code: int, message: str, temporary: bool):
@@ -37,5 +41,5 @@ class ReplyError(CentrifugeError):
 
 class UnauthorizedError(CentrifugeError):
     """UnauthorizedError may be raised from user's get_token functions to indicate
-    a client is not able to connect or subscribe.
+    that a client is not able to connect or subscribe.
     """

@@ -69,6 +69,7 @@ python = ["38", "39", "310", "311", "312"]
 path = "centrifuge/__meta__.py"
 
 [tool.ruff]
+preview = true
 line-length = 99
 select = [
     "PL", # pylint
@@ -98,13 +99,13 @@ select = [
     "RUF", # ruff
 ]
 ignore = [
-    "PLR0913", # Too many arguments to function call
-    "C901", # TODO: solve this one, too complex
+    "PLR0913", # Aligns with other SDKs.
+    "C901", # TODO: solve this one, too complex functions
     "PLR0911", # TODO: solve this one, too many return statements
-    "S311", # Standard pseudo-random generators are not suitable for cryptographic purposes
     "PLR0915", # TODO, solve this one, too many statements
     "RUF006", # TODO: solve this one, store a reference to the return value of `ensure_future`
     "PLR2004", # TODO: solve this one, magic value
+    "PLR0917", # Aligns with other SDKs.
 ]
 exclude = ["centrifuge/protocol/client_pb2.py"]
 
@@ -115,5 +116,6 @@ exclude = ["centrifuge/protocol/client_pb2.py"]
     "S101", # Use of assert detected
 ]
 "example.py" = [
-    "S105"
+    "S105", # Yes, token is hard-coded in the example.
+    "PLR6301", # Seems fine for the example.
 ]

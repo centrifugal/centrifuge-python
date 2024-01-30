@@ -1,8 +1,7 @@
-.PHONY: proto test lint
+.PHONY: proto test lint lint-ci
 
 dev:
-	pip install -r requirements.txt
-	pip install -r requirements-dev.txt
+	pip install -e ".[dev]"
 
 proto:
 	protoc --python_out=centrifuge/protocol client.proto
@@ -11,4 +10,7 @@ test:
 	python -m unittest discover -s tests
 
 lint:
-	flake8 centrifuge --max-line-length 120 --exclude centrifuge/protocol/client_pb2.py
+	ruff .
+
+lint-ci:
+	ruff . --output-format=github

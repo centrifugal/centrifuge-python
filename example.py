@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import signal
-from typing import Any
 
 from centrifuge import (
     CentrifugeError,
@@ -19,9 +18,8 @@ from centrifuge import (
     SubscriptionErrorContext,
     SubscriptionTokenContext,
     UnsubscribedContext,
-    Subscription,
 )
-from centrifuge.handlers import SubscriptionEventHandler, ConnectionEventHandler
+from centrifuge.handlers import SubscriptionEventHandler, ClientEventHandler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,16 +30,7 @@ cf_logger = logging.getLogger("centrifuge")
 cf_logger.setLevel(logging.DEBUG)
 
 
-class SignalHandler:
-    def __init__(self, client: Client) -> None:
-        self.client = client
-
-    def handler(self, *_: Any) -> None:
-        loop = asyncio.get_event_loop()
-        loop.create_task(shutdown(self.client))
-
-
-class ConnectionEventLoggerHandler(ConnectionEventHandler):
+class ClientEventLoggerHandler(ClientEventHandler):
     async def on_connecting(self, ctx: ConnectingContext) -> None:
         logging.info("connecting: %s", ctx)
 
@@ -107,61 +96,13 @@ async def get_subscription_token(ctx: SubscriptionTokenContext) -> str:
     return example_token
 
 
-async def run(sub: Subscription, client: Client) -> None:
-    await client.connect()
-    await sub.subscribe()
-
-    try:
-        # Note that in Protobuf case we need to encode payloads to bytes: result = await
-        # sub.publish(data=json.dumps({"input": "test"}).encode())
-        # But in JSON protocol case we can just pass dict which will be encoded to JSON
-        # automatically.
-        await sub.publish(data={"input": "test"})
-
-    except CentrifugeError as e:
-        logging.error("error publish: %s", e)
-
-    try:
-        presence_stats = await sub.presence_stats()
-        logging.info(presence_stats)
-    except CentrifugeError as e:
-        logging.error("error presence stats: %s", e)
-
-    try:
-        presence = await sub.presence()
-        logging.info(presence)
-    except CentrifugeError as e:
-        logging.error("error presence: %s", e)
-
-    try:
-        history = await sub.history(limit=10, reverse=True)
-        logging.info(history)
-    except CentrifugeError as e:
-        logging.error("error history: %s", e)
-
-    logging.info("all done, connection is still alive, press Ctrl+C to exit")
-
-
-async def shutdown(client: Client) -> None:
-    logging.info("Received exit signal")
-    await client.disconnect()
-
-    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-    for task in tasks:
-        task.cancel()
-
-    logging.info("Cancelling outstanding tasks")
-    await asyncio.gather(*tasks, return_exceptions=True)
-
-
-async def run_example() -> None:
+def run_example():
     client = Client(
         "ws://localhost:8000/connection/websocket",
-        events=ConnectionEventLoggerHandler(),
+        events=ClientEventLoggerHandler(),
         get_token=get_token,
         use_protobuf=False,
     )
-    signal_handler = SignalHandler(client)
 
     sub = client.new_subscription(
         "example:channel",
@@ -169,14 +110,66 @@ async def run_example() -> None:
         get_token=get_subscription_token,
     )
 
-    await run(sub, client)
+    async def run():
+        asyncio.ensure_future(client.connect())
+        asyncio.ensure_future(sub.subscribe())
 
-    signal.signal(signal.SIGTERM, signal_handler.handler)
-    signal.signal(signal.SIGINT, signal_handler.handler)
+        try:
+            # Note that in Protobuf case we need to encode payloads to bytes:
+            # result = await sub.publish(data=json.dumps({"input": "test"}).encode())
+            # But in JSON protocol case we can just pass dict which will be encoded to
+            # JSON automatically.
+            await sub.publish(data={"input": "test"})
+        except CentrifugeError as e:
+            logging.error("error publish: %s", e)
+
+        try:
+            result = await sub.presence_stats()
+            logging.info(result)
+        except CentrifugeError as e:
+            logging.error("error presence stats: %s", e)
+
+        try:
+            result = await sub.presence()
+            logging.info(result)
+        except CentrifugeError as e:
+            logging.error("error presence: %s", e)
+
+        try:
+            result = await sub.history(limit=1, reverse=True)
+            logging.info(result)
+        except CentrifugeError as e:
+            logging.error("error history: %s", e)
+
+        logging.info("all done, connection is still alive, press Ctrl+C to exit")
+
+    asyncio.ensure_future(run())
+    loop = asyncio.get_event_loop()
+
+    async def shutdown(received_signal):
+        logging.info("received exit signal %s...", received_signal.name)
+        await client.disconnect()
+
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+
+        logging.info("Cancelling outstanding tasks")
+        await asyncio.gather(*tasks, return_exceptions=True)
+        loop.stop()
+
+    signals = (signal.SIGTERM, signal.SIGINT)
+    for s in signals:
+        loop.add_signal_handler(
+            s, lambda received_signal=s: asyncio.create_task(shutdown(received_signal))
+        )
+
+    try:
+        loop.run_forever()
+    finally:
+        loop.close()
+        logging.info("successfully completed service shutdown")
 
 
 if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(run_example())
-    loop.run_forever()
+    run_example()
