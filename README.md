@@ -23,9 +23,23 @@ from centrifuge import Client
 
 See [example code](https://github.com/centrifugal/centrifuge-python/blob/master/example.py) and [how to run it](#run-example) locally.
 
+## JSON vs Protobuf protocols
+
+By default, SDK uses JSON protocol. If you want to use Protobuf protocol instead then pass `use_protobuf=True` option.
+
+When using JSON protocol:
+
+* all payloads (data to publish, connect/subscribe data) you pass to the library are encoded to JSON internally using `json.dumps` before sending to server. So make sure you pass only JSON-serializable data to the library.
+* all payloads received from server are decoded to Python objects using `json.loads` internally before passing to your code.
+
+When using Protobuf protocol:
+
+* all payloads you pass to the library must be `bytes` or `None` if optional. If you pass non-`bytes` data – exception will be raised.
+* all payloads received from the library will be `bytes` or `None` if not present.
+
 ## Run tests
 
-To run tests first start Centrifugo server:
+To run tests, first start Centrifugo server:
 
 ```bash
 docker run -p 8000:8000 centrifugo/centrifugo:v5 centrifugo --client_insecure --log_level debug
@@ -37,12 +51,12 @@ And then:
 python -m venv env
 . env/bin/activate
 make dev
-python -m unittest discover -s tests
+make test
 ```
 
 ## Run example
 
-Start Centrifugo with config like this (defines namespace called "example", enables features used in the example):
+To run [example](https://github.com/centrifugal/centrifuge-python/blob/master/example.py), first start Centrifugo with config like this:
 
 ```json
 {

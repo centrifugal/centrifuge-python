@@ -58,7 +58,6 @@ from centrifuge.handlers import (
     SubscriptionEventHandler,
 )
 from centrifuge.types import (
-    BytesOrJSON,
     ClientInfo,
     HistoryResult,
     PresenceResult,
@@ -122,7 +121,7 @@ class Client:
         max_server_ping_delay: float = 10.0,
         name: str = "python",
         version: str = "",
-        data: BytesOrJSON = None,
+        data: Any = None,
         min_reconnect_delay: float = 0.1,
         max_reconnect_delay: float = 20.0,
         loop: Any = None,
@@ -748,7 +747,7 @@ class Client:
         if cb.done:
             await cb.done
 
-    def _decode_data(self, data: BytesOrJSON):
+    def _decode_data(self, data: Any):
         if data is None:
             return None
         if self._use_protobuf:
@@ -758,7 +757,7 @@ class Client:
         else:
             return data
 
-    def _encode_data(self, data: BytesOrJSON):
+    def _encode_data(self, data: Any):
         if self._use_protobuf:
             if not isinstance(data, bytes):
                 raise CentrifugeError(
@@ -789,7 +788,7 @@ class Client:
     async def publish(
         self,
         channel: str,
-        data: BytesOrJSON,
+        data: Any,
         timeout: Optional[float] = None,
     ) -> PublishResult:
         await self.ready()
@@ -911,7 +910,7 @@ class Client:
     async def rpc(
         self,
         method: str,
-        data: BytesOrJSON,
+        data: Any,
         timeout: Optional[float] = None,
     ) -> RpcResult:
         await self.ready()
@@ -1268,7 +1267,7 @@ class Subscription:
         # noinspection PyProtectedMember
         return await self._client.presence_stats(self.channel, timeout=timeout)
 
-    async def publish(self, data: BytesOrJSON, timeout: Optional[float] = None) -> PublishResult:
+    async def publish(self, data: Any, timeout: Optional[float] = None) -> PublishResult:
         await self.ready(timeout=timeout)
         # noinspection PyProtectedMember
         return await self._client.publish(self.channel, data, timeout=timeout)

@@ -32,8 +32,6 @@ from .exceptions import (
     UnauthorizedError,
 )
 from .types import (
-    JSON,
-    BytesOrJSON,
     ClientInfo,
     HistoryResult,
     PresenceResult,
@@ -45,8 +43,6 @@ from .types import (
 )
 
 __all__ = [
-    "JSON",
-    "BytesOrJSON",
     "CentrifugeError",
     "Client",
     "ClientDisconnectedError",

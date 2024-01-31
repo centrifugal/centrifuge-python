@@ -1,7 +1,7 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Any
 
-from centrifuge.types import BytesOrJSON, ClientInfo, Publication, StreamPosition
+from centrifuge.types import ClientInfo, Publication, StreamPosition
 
 
 @dataclass
@@ -17,7 +17,7 @@ class ConnectedContext:
 
     client: str
     version: str
-    data: Optional[BytesOrJSON]
+    data: Optional[Any]
 
 
 @dataclass
@@ -134,7 +134,7 @@ class SubscribedContext:
     stream_position: Optional[StreamPosition]
     was_recovering: bool
     recovered: bool
-    data: Optional[BytesOrJSON]
+    data: Optional[Any]
 
 
 @dataclass

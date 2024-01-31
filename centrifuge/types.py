@@ -1,10 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
-
-# JSON type represents objects which may be encoded to JSON.
-JSON = Union[Dict[str, "JSON"], List["JSON"], str, int, float, bool, None]
-# BytesOrJSON type represents objects which may be encoded to JSON or bytes.
-BytesOrJSON = Union[bytes, JSON]
+from typing import Dict, List, Optional, Any
 
 
 @dataclass
@@ -29,8 +24,8 @@ class ClientInfo:
 
     client: str
     user: str
-    conn_info: Optional[BytesOrJSON]
-    chan_info: Optional[BytesOrJSON]
+    conn_info: Optional[Any]
+    chan_info: Optional[Any]
 
 
 @dataclass
@@ -45,7 +40,7 @@ class Publication:
     """
 
     offset: int
-    data: BytesOrJSON
+    data: Any
     info: Optional[ClientInfo]
 
 
@@ -58,7 +53,7 @@ class PublishResult:
 class RpcResult:
     """RpcResult is a result of RPC operation."""
 
-    data: BytesOrJSON
+    data: Any
 
 
 @dataclass
