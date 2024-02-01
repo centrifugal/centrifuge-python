@@ -31,6 +31,7 @@ from .exceptions import (
     SubscriptionUnsubscribedError,
     UnauthorizedError,
 )
+from .handlers import ClientEventHandler, SubscriptionEventHandler
 from .types import (
     ClientInfo,
     HistoryResult,
@@ -46,6 +47,7 @@ __all__ = [
     "CentrifugeError",
     "Client",
     "ClientDisconnectedError",
+    "ClientEventHandler",
     "ClientInfo",
     "ClientState",
     "ConnectedContext",
@@ -76,6 +78,7 @@ __all__ = [
     "SubscribingContext",
     "Subscription",
     "SubscriptionErrorContext",
+    "SubscriptionEventHandler",
     "SubscriptionState",
     "SubscriptionTokenContext",
     "SubscriptionUnsubscribedError",

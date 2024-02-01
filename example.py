@@ -5,6 +5,7 @@ import signal
 from centrifuge import (
     CentrifugeError,
     Client,
+    ClientEventHandler,
     ConnectedContext,
     ConnectingContext,
     ConnectionTokenContext,
@@ -18,8 +19,8 @@ from centrifuge import (
     SubscriptionErrorContext,
     SubscriptionTokenContext,
     UnsubscribedContext,
+    SubscriptionEventHandler,
 )
-from centrifuge.handlers import SubscriptionEventHandler, ClientEventHandler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,6 +29,35 @@ logging.basicConfig(
 # Configure centrifuge-python logger.
 cf_logger = logging.getLogger("centrifuge")
 cf_logger.setLevel(logging.DEBUG)
+
+
+async def get_token(ctx: ConnectionTokenContext) -> str:
+    # To reject connection raise centrifuge.UnauthorizedError() exception:
+    # raise centrifuge.UnauthorizedError()
+
+    logging.info("get connection token called: %s", ctx)
+
+    # REPLACE with your own logic to get token from the backend!
+    example_token = (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsImV4cCI6Nzc1NDI2MTQwOSwiaWF0Ij"
+        "oxNzA2MjYxNDA5fQ.9jQEr9XqAW1BY9oolmawhtLRx1ZLJZS6ivgYznuf4-Y"
+    )
+    return example_token
+
+
+async def get_subscription_token(ctx: SubscriptionTokenContext) -> str:
+    # To reject subscription raise centrifuge.UnauthorizedError() exception:
+    # raise centrifuge.UnauthorizedError()
+
+    logging.info("get subscription token called: %s", ctx)
+
+    # REPLACE with your own logic to get token from the backend!
+    example_token = (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsImV4cCI6Nzc1NDQ0MzA1NywiaWF0IjoxNz"
+        "A2NDQzMDU3LCJjaGFubmVsIjoiZXhhbXBsZTpjaGFubmVsIn0._rcyM78ol1MgCqngA4Vyt8P3o1SnDX_hSXhEA"
+        "_xByKU"
+    )
+    return example_token
 
 
 class ClientEventLoggerHandler(ClientEventHandler):
@@ -64,36 +94,7 @@ class SubscriptionEventLoggerHandler(SubscriptionEventHandler):
         logging.info("leave: %s", ctx)
 
     async def on_error(self, ctx: SubscriptionErrorContext) -> None:
-        logging.info("subscription error: %s", ctx)
-
-
-async def get_token(ctx: ConnectionTokenContext) -> str:
-    # To reject connection raise centrifuge.UnauthorizedError() exception:
-    # raise centrifuge.UnauthorizedError()
-
-    logging.info("get connection token called: %s", ctx)
-
-    # REPLACE with your own logic to get token from the backend!
-    example_token = (
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsImV4cCI6Nzc1NDI2MTQwOSwiaWF0Ij"
-        "oxNzA2MjYxNDA5fQ.9jQEr9XqAW1BY9oolmawhtLRx1ZLJZS6ivgYznuf4-Y"
-    )
-    return example_token
-
-
-async def get_subscription_token(ctx: SubscriptionTokenContext) -> str:
-    # To reject subscription raise centrifuge.UnauthorizedError() exception:
-    # raise centrifuge.UnauthorizedError()
-
-    logging.info("get subscription token called: %s", ctx)
-
-    # REPLACE with your own logic to get token from the backend!
-    example_token = (
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsImV4cCI6Nzc1NDQ0MzA1NywiaWF0IjoxNz"
-        "A2NDQzMDU3LCJjaGFubmVsIjoiZXhhbXBsZTpjaGFubmVsIn0._rcyM78ol1MgCqngA4Vyt8P3o1SnDX_hSXhEA"
-        "_xByKU"
-    )
-    return example_token
+        logging.error("subscription error: %s", ctx)
 
 
 def run_example():
@@ -111,8 +112,8 @@ def run_example():
     )
 
     async def run():
-        asyncio.ensure_future(client.connect())
-        asyncio.ensure_future(sub.subscribe())
+        await client.connect()
+        await sub.subscribe()
 
         try:
             # Note that in Protobuf case we need to encode payloads to bytes:
@@ -141,7 +142,7 @@ def run_example():
         except CentrifugeError as e:
             logging.error("error history: %s", e)
 
-        logging.info("all done, connection is still alive, press Ctrl+C to exit")
+        logging.info("all done, client connection is still alive, press Ctrl+C to exit")
 
     asyncio.ensure_future(run())
     loop = asyncio.get_event_loop()
