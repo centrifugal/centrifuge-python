@@ -72,6 +72,12 @@ class ServerSubscribedContext:
     """
 
     channel: str
+    recoverable: bool
+    positioned: bool
+    stream_position: Optional[StreamPosition]
+    was_recovering: bool
+    recovered: bool
+    data: Optional[Any]
 
 
 @dataclass

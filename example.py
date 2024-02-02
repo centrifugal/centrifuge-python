@@ -20,6 +20,12 @@ from centrifuge import (
     SubscriptionTokenContext,
     UnsubscribedContext,
     SubscriptionEventHandler,
+    ServerSubscribedContext,
+    ServerSubscribingContext,
+    ServerUnsubscribedContext,
+    ServerPublicationContext,
+    ServerJoinContext,
+    ServerLeaveContext,
 )
 
 logging.basicConfig(
@@ -72,6 +78,24 @@ class ClientEventLoggerHandler(ClientEventHandler):
 
     async def on_error(self, ctx: ErrorContext) -> None:
         logging.error("client error: %s", ctx)
+
+    async def on_subscribed(self, ctx: ServerSubscribedContext) -> None:
+        logging.info("subscribed server-side sub: %s", ctx)
+
+    async def on_subscribing(self, ctx: ServerSubscribingContext) -> None:
+        logging.info("subscribing server-side sub: %s", ctx)
+
+    async def on_unsubscribed(self, ctx: ServerUnsubscribedContext) -> None:
+        logging.info("unsubscribed from server-side sub: %s", ctx)
+
+    async def on_publication(self, ctx: ServerPublicationContext) -> None:
+        logging.info("publication from server-side sub: %s", ctx.pub.data)
+
+    async def on_join(self, ctx: ServerJoinContext) -> None:
+        logging.info("join in server-side sub: %s", ctx)
+
+    async def on_leave(self, ctx: ServerLeaveContext) -> None:
+        logging.info("leave in server-side sub: %s", ctx)
 
 
 class SubscriptionEventLoggerHandler(SubscriptionEventHandler):
