@@ -4,8 +4,15 @@ import json
 import logging
 import unittest
 import uuid
+from typing import List
 
-from centrifuge import Client, ClientState, SubscriptionState, PublicationContext
+from centrifuge import (
+    Client,
+    ClientState,
+    SubscriptionState,
+    PublicationContext,
+    SubscribedContext,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -104,3 +111,65 @@ class TestPubSub(unittest.IsolatedAsyncioTestCase):
         result = await future
         self.assertEqual(result, payload)
         await client.disconnect()
+
+
+class TestAutoRecovery(unittest.IsolatedAsyncioTestCase):
+    async def test_auto_recovery(self) -> None:
+        for use_protobuf in (False, True):
+            with self.subTest(use_protobuf=use_protobuf):
+                await self._test_auto_recovery(use_protobuf=use_protobuf)
+
+    async def _test_auto_recovery(self, use_protobuf=False) -> None:
+        client1 = Client(
+            "ws://localhost:8000/connection/websocket",
+            use_protobuf=use_protobuf,
+        )
+
+        client2 = Client(
+            "ws://localhost:8000/connection/websocket",
+            use_protobuf=use_protobuf,
+        )
+
+        # First subscribe both clients to the same channel.
+        channel = "recovery_channel" + uuid.uuid4().hex
+        sub1 = client1.new_subscription(channel)
+        sub2 = client2.new_subscription(channel)
+
+        futures: List[asyncio.Future] = [asyncio.Future() for _ in range(5)]
+
+        async def on_publication(ctx: PublicationContext) -> None:
+            futures[ctx.pub.offset - 1].set_result(ctx.pub.data)
+
+        async def on_subscribed(ctx: SubscribedContext) -> None:
+            self.assertFalse(ctx.recovered)
+            self.assertFalse(ctx.was_recovering)
+
+        sub1.events.on_publication = on_publication
+        sub1.events.on_subscribed = on_subscribed
+
+        await client1.connect()
+        await sub1.subscribe()
+        await client2.connect()
+        await sub2.subscribe()
+
+        # Now disconnect client1 and publish some messages using client2.
+        await client1.disconnect()
+
+        for _ in range(10):
+            payload = {"input": "test"}
+            if use_protobuf:
+                payload = json.dumps(payload).encode()
+            await sub2.publish(data=payload)
+
+        async def on_subscribed_after_recovery(ctx: SubscribedContext) -> None:
+            self.assertTrue(ctx.recovered)
+            self.assertTrue(ctx.was_recovering)
+
+        sub1.events.on_subscribed = on_subscribed_after_recovery
+
+        # Now reconnect client1 and check that it receives all missed messages.
+        await client1.connect()
+        results = await asyncio.gather(*futures)
+        self.assertEqual(len(results), 5)
+        await client1.disconnect()
+        await client2.disconnect()

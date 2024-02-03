@@ -85,6 +85,7 @@ if TYPE_CHECKING:
     # Turned out legacy is not really legacy in websockets.
     # See more in https://websockets.readthedocs.io/en/stable/faq/ (grep "legacy").
     from websockets.legacy.client import WebSocketClientProtocol
+    from asyncio import AbstractEventLoop
 
 logger = logging.getLogger("centrifuge")
 
@@ -140,7 +141,7 @@ class Client:
         min_reconnect_delay: float = 0.1,
         max_reconnect_delay: float = 20.0,
         headers: Optional[Dict[str, str]] = None,
-        loop: Any = None,
+        loop: Optional["AbstractEventLoop"] = None,
     ):
         """Initializes new Client instance.
 
@@ -196,8 +197,12 @@ class Client:
         events: Optional[SubscriptionEventHandler] = None,
         token: str = "",
         get_token: Optional[Callable[[SubscriptionTokenContext], Awaitable[str]]] = None,
+        data: Optional[Any] = None,
         min_resubscribe_delay=0.1,
         max_resubscribe_delay=10.0,
+        positioned: bool = False,
+        recoverable: bool = False,
+        join_leave: bool = False,
     ) -> "Subscription":
         """Creates new subscription to channel. If subscription already exists then
         DuplicateSubscriptionError exception will be raised.
@@ -212,8 +217,12 @@ class Client:
             events=events,
             token=token,
             get_token=get_token,
+            data=data,
             min_resubscribe_delay=min_resubscribe_delay,
             max_resubscribe_delay=max_resubscribe_delay,
+            positioned=positioned,
+            recoverable=recoverable,
+            join_leave=join_leave,
         )
         self._subs[channel] = sub
         return sub
@@ -297,12 +306,7 @@ class Client:
             asyncio.ensure_future(self._schedule_reconnect())
             return False
 
-        self._delay = self._min_reconnect_delay
-        connect = {}
-
-        if self._token:
-            connect["token"] = self._token
-        elif self._get_token:
+        if not self._token and self._get_token:
             try:
                 token = await self._get_token(ConnectionTokenContext())
             except Exception as e:
@@ -319,7 +323,6 @@ class Client:
                 return False
 
             self._token = token
-            connect["token"] = token
 
         if self.state != ClientState.CONNECTING:
             return False
@@ -327,11 +330,10 @@ class Client:
         asyncio.ensure_future(self._listen())
         asyncio.ensure_future(self._process_messages())
 
+        self._delay = self._min_reconnect_delay
+
         cmd_id = self._next_command_id()
-        command = {
-            "id": cmd_id,
-            "connect": connect,
-        }
+        command = self._construct_connect_command(cmd_id)
         async with self._register_future_with_done(cmd_id) as future:
             await self._send_commands([command])
 
@@ -418,6 +420,38 @@ class Client:
 
                 await self._process_server_subs(connect.get("subs", {}))
 
+    def _construct_connect_command(self, cmd_id: int) -> Dict[str, Any]:
+        connect = {}
+
+        if self._token:
+            connect["token"] = self._token
+
+        if self._data:
+            connect["data"] = self._encode_data(self._data)
+
+        if self._name:
+            connect["name"] = self._name
+
+        if self._version:
+            connect["version"] = self._version
+
+        subs = {}
+        for channel, sub in self._server_subs.items():
+            if sub.recoverable:
+                subs[channel] = {
+                    "recover": True,
+                    "offset": sub.offset,
+                    "epoch": sub.epoch,
+                }
+        if subs:
+            connect["subs"] = subs
+
+        command = {
+            "id": cmd_id,
+            "connect": connect,
+        }
+        return command
+
     async def _process_server_subs(self, subs: Dict[str, Dict[str, Any]]):
         logger.debug("process server subs: %s", subs)
         for channel, subscribe in subs.items():
@@ -468,17 +502,19 @@ class Client:
         handler = self.events.on_publication
         info = pub.get("info")
         client_info = self._extract_client_info(info) if info else None
+        offset = int(pub.get("offset", 0))
         await handler(
             ServerPublicationContext(
                 channel=channel,
                 pub=Publication(
-                    offset=int(pub.get("offset", 0)),
+                    offset=offset,
                     data=self._decode_data(pub.get("data")),
                     info=client_info,
                 ),
             )
         )
-        # TODO: manage offsets here.
+        if offset > 0:
+            self._server_subs[channel].offset = offset
 
     def _clear_connecting_state(self) -> None:
         self._reconnect_attempts = 0
@@ -664,11 +700,7 @@ class Client:
 
         logger.debug("subscribe to channel %s", channel)
 
-        subscribe = {"channel": channel}
-
-        if sub._token:
-            subscribe["token"] = sub._token
-        elif sub._get_token:
+        if not sub._token and sub._get_token:
             try:
                 token = await sub._get_token(SubscriptionTokenContext(channel=channel))
             except Exception as e:
@@ -687,13 +719,9 @@ class Client:
                 return False
 
             sub._token = token
-            subscribe["token"] = token
 
         cmd_id = self._next_command_id()
-        command = {
-            "id": cmd_id,
-            "subscribe": subscribe,
-        }
+        command = self._construct_subscribe_command(sub, cmd_id)
         async with self._register_future_with_done(cmd_id) as future:
             await self._send_commands([command])
             try:
@@ -744,6 +772,37 @@ class Client:
                     await sub._move_unsubscribed(code, message)
             else:
                 await sub._move_subscribed(reply["subscribe"])
+
+    def _construct_subscribe_command(self, sub: "Subscription", cmd_id: int) -> Dict[str, Any]:
+        subscribe = {
+            "channel": sub.channel,
+        }
+
+        if sub._token:
+            subscribe["token"] = sub._token
+
+        if sub._data:
+            subscribe["data"] = self._encode_data(sub._data)
+
+        if sub._positioned:
+            subscribe["positioned"] = True
+
+        if sub._recoverable:
+            subscribe["recoverable"] = True
+
+        if sub._join_leave:
+            subscribe["join_leave"] = True
+
+        if sub._need_recover():
+            subscribe["recover"] = True
+            subscribe["epoch"] = sub._epoch
+            subscribe["offset"] = sub._offset
+
+        command = {
+            "id": cmd_id,
+            "subscribe": subscribe,
+        }
+        return command
 
     async def _resubscribe(self, sub: "Subscription"):
         self._subs[sub.channel] = sub
@@ -1299,8 +1358,12 @@ class Subscription:
         events: Optional[SubscriptionEventHandler] = None,
         token: str = "",
         get_token: Optional[Callable[[SubscriptionTokenContext], Awaitable[str]]] = None,
+        data: Optional[Any] = None,
         min_resubscribe_delay: float = 0.1,
         max_resubscribe_delay: float = 10.0,
+        positioned: bool = False,
+        recoverable: bool = False,
+        join_leave: bool = False,
     ) -> None:
         """Initializes Subscription instance.
         Note: use Client.new_subscription method to create new subscriptions in your app.
@@ -1313,11 +1376,18 @@ class Subscription:
         self._client: Optional[Client] = client
         self._token = token
         self._get_token = get_token
+        self._data = data
         self._min_resubscribe_delay = min_resubscribe_delay
         self._max_resubscribe_delay = max_resubscribe_delay
+        self._positioned = positioned
+        self._recoverable = recoverable
+        self._join_leave = join_leave
         self._resubscribe_attempts = 0
         self._refresh_timer: Optional[TimerHandle] = None
         self._resubscribe_timer: Optional[TimerHandle] = None
+        self._recover: bool = False
+        self._offset: int = 0
+        self._epoch: str = ""
 
     @classmethod
     def _create_instance(cls, *args: Any, **kwargs: Any) -> "Subscription":
@@ -1481,6 +1551,11 @@ class Subscription:
                 epoch=subscribe.get("epoch", ""),
             )
 
+        if recoverable:
+            self._recover = True
+            self._offset = stream_position.offset
+            self._epoch = stream_position.epoch
+
         expires = subscribe.get("expires", False)
         if expires:
             ttl = subscribe["ttl"]
@@ -1507,15 +1582,18 @@ class Subscription:
             for pub in publications:
                 info = pub.get("info")
                 client_info = self._client._extract_client_info(info) if info else None
+                offset = int(pub.get("offset", 0))
                 await on_publication_handler(
                     PublicationContext(
                         pub=Publication(
-                            offset=int(pub.get("offset", 0)),
+                            offset=offset,
                             data=self._client._decode_data(pub.get("data")),
                             info=client_info,
                         ),
                     ),
                 )
+                if offset > 0:
+                    self._offset = offset
 
         self._clear_subscribing_state()
 
@@ -1548,12 +1626,18 @@ class Subscription:
     async def _process_publication(self, pub: Any) -> None:
         info = pub.get("info")
         client_info = self._client._extract_client_info(info) if info else None
+        offset = int(pub.get("offset", 0))
         await self.events.on_publication(
             PublicationContext(
                 pub=Publication(
-                    offset=int(pub.get("offset", 0)),
+                    offset=offset,
                     data=self._client._decode_data(pub.get("data")),
                     info=client_info,
                 ),
             ),
         )
+        if offset > 0:
+            self._offset = offset
+
+    def _need_recover(self):
+        return self._recover
