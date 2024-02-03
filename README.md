@@ -1,6 +1,6 @@
 # centrifuge-python (work in progress)
 
-[![CI](https://github.com/centrifugal/centrifuge-python/actions/workflows/test.yml/badge.svg)](https://github.com/centrifugal/centrifuge-python/actions?query=event%3Apush+branch%3Amaster+workflow%3ACI)
+[![CI](https://github.com/centrifugal/centrifuge-python/actions/workflows/test.yml/badge.svg)](https://github.com/centrifugal/centrifuge-python/actions/workflows/test.yml?query=event%3Apush+branch%3Amaster+workflow%3ATest)
 [![pypi](https://img.shields.io/pypi/v/centrifuge-python.svg)](https://pypi.python.org/pypi/centrifuge-python)
 [![versions](https://img.shields.io/pypi/pyversions/centrifuge-python.svg)](https://github.com/centrifugal/centrifuge-python)
 [![license](https://img.shields.io/github/license/centrifugal/centrifuge-python.svg)](https://github.com/centrifugal/centrifuge-python/blob/master/LICENSE)
