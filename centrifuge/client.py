@@ -346,14 +346,12 @@ class Client:
                 await self._schedule_reconnect()
                 return False
             except Exception as e:
-                # TODO: think on better error handling here.
                 if self.state != ClientState.CONNECTING:
                     return False
                 await self._close_transport_conn()
                 handler = self.events.on_error
-                # TODO: think on better error code here.
                 await handler(
-                    ErrorContext(code=_code_number(_ErrorCode.TRANSPORT_CLOSED), error=e),
+                    ErrorContext(code=_code_number(_ErrorCode.CONNECT_ERROR), error=e),
                 )
                 await self._schedule_reconnect()
                 return False
@@ -372,7 +370,7 @@ class Client:
                     handler = self.events.on_error
                     await handler(
                         ErrorContext(
-                            code=_code_number(_ErrorCode.CONNECT_REPLY_ERROR),
+                            code=_code_number(_ErrorCode.CONNECT_ERROR),
                             error=ReplyError(code, message, temporary),
                         ),
                     )
@@ -499,22 +497,12 @@ class Client:
             del self._server_subs[channel]
 
     async def _process_server_publication(self, channel: str, pub: Any):
-        handler = self.events.on_publication
-        info = pub.get("info")
-        client_info = self._extract_client_info(info) if info else None
-        offset = int(pub.get("offset", 0))
-        await handler(
-            ServerPublicationContext(
-                channel=channel,
-                pub=Publication(
-                    offset=offset,
-                    data=self._decode_data(pub.get("data")),
-                    info=client_info,
-                ),
-            )
+        publication = self._publication_from_proto(pub)
+        await self.events.on_publication(
+            ServerPublicationContext(channel=channel, pub=publication)
         )
-        if offset > 0:
-            self._server_subs[channel].offset = offset
+        if publication.offset > 0:
+            self._server_subs[channel].offset = publication.offset
 
     def _clear_connecting_state(self) -> None:
         self._reconnect_attempts = 0
@@ -736,14 +724,12 @@ class Client:
                 await sub._schedule_resubscribe()
                 return None
             except Exception as e:
-                # TODO: think on better error handling here.
                 if sub.state != SubscriptionState.SUBSCRIBING:
                     return None
                 handler = sub.events.on_error
-                # TODO: think on better error code here.
                 await handler(
                     SubscriptionErrorContext(
-                        code=_code_number(_ErrorCode.TRANSPORT_CLOSED),
+                        code=_code_number(_ErrorCode.SUBSCRIBE_ERROR),
                         error=e,
                     ),
                 )
@@ -763,7 +749,7 @@ class Client:
                     handler = sub.events.on_error
                     await handler(
                         SubscriptionErrorContext(
-                            code=_code_number(_ErrorCode.SUBSCRIBE_REPLY_ERROR),
+                            code=_code_number(_ErrorCode.SUBSCRIBE_ERROR),
                             error=ReplyError(code, message, temporary),
                         ),
                     )
@@ -1001,15 +987,8 @@ class Client:
 
         publications = []
         for pub in reply["history"].get("publications", []):
-            info = pub.get("info")
-            client_info = self._extract_client_info(info) if info else None
-            publications.append(
-                Publication(
-                    offset=int(pub.get("offset", 0)),
-                    data=self._decode_data(pub.get("data")),
-                    info=client_info,
-                ),
-            )
+            publication = self._publication_from_proto(pub)
+            publications.append(publication)
 
         return HistoryResult(
             epoch=reply["history"].get("epoch", ""),
@@ -1325,6 +1304,17 @@ class Client:
 
         await self._disconnect(disconnect_code, disconnect_reason, reconnect)
 
+    def _publication_from_proto(self, pub: Any) -> Publication:
+        info = pub.get("info")
+        client_info = self._extract_client_info(info) if info else None
+        offset = int(pub.get("offset", 0))
+        return Publication(
+            offset=offset,
+            data=self._decode_data(pub.get("data")),
+            info=client_info,
+            tags=pub.get("tags", {}),
+        )
+
 
 class Subscription:
     """
@@ -1580,20 +1570,10 @@ class Subscription:
         if publications:
             on_publication_handler = self.events.on_publication
             for pub in publications:
-                info = pub.get("info")
-                client_info = self._client._extract_client_info(info) if info else None
-                offset = int(pub.get("offset", 0))
-                await on_publication_handler(
-                    PublicationContext(
-                        pub=Publication(
-                            offset=offset,
-                            data=self._client._decode_data(pub.get("data")),
-                            info=client_info,
-                        ),
-                    ),
-                )
-                if offset > 0:
-                    self._offset = offset
+                publication = self._client._publication_from_proto(pub)
+                await on_publication_handler(PublicationContext(pub=publication))
+                if publication.offset > 0:
+                    self._offset = publication.offset
 
         self._clear_subscribing_state()
 
@@ -1624,20 +1604,10 @@ class Subscription:
         await self._client._resubscribe(self)
 
     async def _process_publication(self, pub: Any) -> None:
-        info = pub.get("info")
-        client_info = self._client._extract_client_info(info) if info else None
-        offset = int(pub.get("offset", 0))
-        await self.events.on_publication(
-            PublicationContext(
-                pub=Publication(
-                    offset=offset,
-                    data=self._client._decode_data(pub.get("data")),
-                    info=client_info,
-                ),
-            ),
-        )
-        if offset > 0:
-            self._offset = offset
+        publication = self._client._publication_from_proto(pub)
+        await self.events.on_publication(PublicationContext(pub=publication))
+        if publication.offset > 0:
+            self._offset = publication.offset
 
     def _need_recover(self):
         return self._recover

@@ -42,6 +42,7 @@ class Publication:
     offset: int
     data: Any
     info: Optional[ClientInfo]
+    tags: Dict[str, str]
 
 
 @dataclass

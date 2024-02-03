@@ -60,8 +60,8 @@ class _ErrorCode(Enum):
     TRANSPORT_WRITE_ERROR = 10
     CONNECTION_CLOSED = 11
     BAD_CONFIGURATION = 12
-    CONNECT_REPLY_ERROR = 13
-    SUBSCRIBE_REPLY_ERROR = 14
+    CONNECT_ERROR = 13
+    SUBSCRIBE_ERROR = 14
 
     # Errors with code > 100 are errors from server.
     TOKEN_EXPIRED = 109
