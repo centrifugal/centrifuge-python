@@ -36,6 +36,7 @@ When using Protobuf protocol:
 
 * all payloads you pass to the library must be `bytes` or `None` if optional. If you pass non-`bytes` data – exception will be raised.
 * all payloads received from the library will be `bytes` or `None` if not present.
+* don't forget that when using Protobuf protocol you can still have JSON payloads - just encode them to `bytes` before passing to the library.
 
 ## Run tests
 
