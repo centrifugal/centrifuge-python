@@ -181,8 +181,8 @@ class SubscriptionErrorContext:
 
 
 @dataclass
-class ConnectionTokenContext:
-    """ConnectionTokenContext is a context passed to get_token callback of connection."""
+class ClientTokenContext:
+    """ClientTokenContext is a context passed to get_token callback of connection."""
 
 
 @dataclass

@@ -8,7 +8,7 @@ from centrifuge import (
     ClientEventHandler,
     ConnectedContext,
     ConnectingContext,
-    ConnectionTokenContext,
+    ClientTokenContext,
     DisconnectedContext,
     ErrorContext,
     JoinContext,
@@ -37,7 +37,7 @@ cf_logger = logging.getLogger("centrifuge")
 cf_logger.setLevel(logging.DEBUG)
 
 
-async def get_token(ctx: ConnectionTokenContext) -> str:
+async def get_token(ctx: ClientTokenContext) -> str:
     # To reject connection raise centrifuge.UnauthorizedError() exception:
     # raise centrifuge.UnauthorizedError()
 
@@ -67,6 +67,8 @@ async def get_subscription_token(ctx: SubscriptionTokenContext) -> str:
 
 
 class ClientEventLoggerHandler(ClientEventHandler):
+    """Check out comments of ClientEventHandler methods to see when they are called."""
+
     async def on_connecting(self, ctx: ConnectingContext) -> None:
         logging.info("connecting: %s", ctx)
 
@@ -99,6 +101,8 @@ class ClientEventLoggerHandler(ClientEventHandler):
 
 
 class SubscriptionEventLoggerHandler(SubscriptionEventHandler):
+    """Check out comments of SubscriptionEventHandler methods to see when they are called."""
+
     async def on_subscribing(self, ctx: SubscribingContext) -> None:
         logging.info("subscribing: %s", ctx)
 
@@ -174,13 +178,6 @@ def run_example():
     async def shutdown(received_signal):
         logging.info("received exit signal %s...", received_signal.name)
         await client.disconnect()
-
-        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-        for task in tasks:
-            task.cancel()
-
-        logging.info("Cancelling outstanding tasks")
-        await asyncio.gather(*tasks, return_exceptions=True)
         loop.stop()
 
     signals = (signal.SIGTERM, signal.SIGINT)

@@ -12,6 +12,10 @@ from centrifuge import (
     SubscriptionState,
     PublicationContext,
     SubscribedContext,
+    ClientTokenContext,
+    SubscriptionTokenContext,
+    DisconnectedContext,
+    UnsubscribedContext,
 )
 
 logging.basicConfig(
@@ -173,3 +177,67 @@ class TestAutoRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(results), 5)
         await client1.disconnect()
         await client2.disconnect()
+
+
+class TestClientToken(unittest.IsolatedAsyncioTestCase):
+    async def test_client_token(self) -> None:
+        for use_protobuf in (False, True):
+            with self.subTest(use_protobuf=use_protobuf):
+                await self._test_client_token(use_protobuf=use_protobuf)
+
+    async def _test_client_token(self, use_protobuf=False) -> None:
+        future = asyncio.Future()
+
+        async def test_get_client_token(ctx: ClientTokenContext) -> str:
+            self.assertEqual(ctx, ClientTokenContext())
+            return "invalid_token"
+
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            use_protobuf=use_protobuf,
+            get_token=test_get_client_token,
+        )
+
+        async def on_disconnected(ctx: DisconnectedContext) -> None:
+            future.set_result(ctx.code)
+
+        client.events.on_disconnected = on_disconnected
+
+        await client.connect()
+        res = await future
+        self.assertTrue(res == 3500)
+        self.assertTrue(client.state == ClientState.DISCONNECTED)
+        await client.disconnect()
+
+
+class TestSubscriptionToken(unittest.IsolatedAsyncioTestCase):
+    async def test_client_token(self) -> None:
+        for use_protobuf in (False, True):
+            with self.subTest(use_protobuf=use_protobuf):
+                await self._test_subscription_token(use_protobuf=use_protobuf)
+
+    async def _test_subscription_token(self, use_protobuf=False) -> None:
+        future = asyncio.Future()
+
+        async def test_get_subscription_token(ctx: SubscriptionTokenContext) -> str:
+            self.assertEqual(ctx, SubscriptionTokenContext(channel="channel"))
+            return "invalid_token"
+
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            use_protobuf=use_protobuf,
+        )
+
+        sub = client.new_subscription("channel", get_token=test_get_subscription_token)
+
+        async def on_unsubscribed(ctx: UnsubscribedContext) -> None:
+            future.set_result(ctx.code)
+
+        sub.events.on_unsubscribed = on_unsubscribed
+
+        await client.connect()
+        await sub.subscribe()
+        res = await future
+        self.assertTrue(res == 103, res)
+        self.assertTrue(client.state == ClientState.CONNECTED)
+        await client.disconnect()
