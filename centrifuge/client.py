@@ -32,7 +32,7 @@ from centrifuge.codes import (
 from centrifuge.contexts import (
     ConnectedContext,
     ConnectingContext,
-    ConnectionTokenContext,
+    ClientTokenContext,
     DisconnectedContext,
     ErrorContext,
     JoinContext,
@@ -131,7 +131,7 @@ class Client:
         address: str,
         events: Optional[ClientEventHandler] = None,
         token: str = "",
-        get_token: Optional[Callable[[ConnectionTokenContext], Awaitable[str]]] = None,
+        get_token: Optional[Callable[[ClientTokenContext], Awaitable[str]]] = None,
         use_protobuf: bool = False,
         timeout: float = 5.0,
         max_server_ping_delay: float = 10.0,
@@ -308,7 +308,7 @@ class Client:
 
         if not self._token and self._get_token:
             try:
-                token = await self._get_token(ConnectionTokenContext())
+                token = await self._get_token(ClientTokenContext())
             except Exception as e:
                 if isinstance(e, UnauthorizedError):
                     code = _DisconnectedCode.UNAUTHORIZED
@@ -551,7 +551,7 @@ class Client:
         cmd_id = self._next_command_id()
 
         try:
-            token = await self._get_token(ConnectionTokenContext())
+            token = await self._get_token(ClientTokenContext())
         except Exception as e:
             if isinstance(e, UnauthorizedError):
                 code = _DisconnectedCode.UNAUTHORIZED

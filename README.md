@@ -43,6 +43,10 @@ When using Protobuf protocol:
 * all payloads received from the library will be `bytes` or `None` if not present.
 * don't forget that when using Protobuf protocol you can still have JSON payloads - just encode them to `bytes` before passing to the library.
 
+## Callbacks should not block
+
+Event callbacks are called by SDK using `await` internally, the websocket connection read loop is blocked for the time SDK waits for the callback to be executed. This means that if you need to perform long operations in callbacks consider moving the work to a separate coroutine/task to return fast and continue reading data from the websocket.
+
 ## Run tests
 
 To run tests, first start Centrifugo server:
