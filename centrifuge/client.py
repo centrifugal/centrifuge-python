@@ -265,7 +265,7 @@ class Client:
             logger.debug("won't reconnect")
             return
 
-        self.status = ClientState.CONNECTING
+        self.state = ClientState.CONNECTING
 
         delay = _backoff(
             self._reconnect_attempts,
@@ -515,7 +515,7 @@ class Client:
         for sub in self._subs.values():
             if sub.state == SubscriptionState.SUBSCRIBED:
                 unsubscribe_code = _SubscribingCode.TRANSPORT_CLOSED
-                await sub.move_subscribing(
+                await sub._move_subscribing(
                     code=_code_number(unsubscribe_code),
                     reason=_code_message(unsubscribe_code),
                     skip_schedule_resubscribe=True,
@@ -1172,7 +1172,7 @@ class Client:
             if code < 2500:
                 asyncio.ensure_future(sub._move_unsubscribed(code, unsubscribe["reason"]))
             else:
-                asyncio.ensure_future(sub.move_subscribing(code, unsubscribe["reason"]))
+                asyncio.ensure_future(sub._move_subscribing(code, unsubscribe["reason"]))
         else:
             server_sub = self._server_subs.get(channel)
             if server_sub:
@@ -1501,7 +1501,7 @@ class Subscription:
         with contextlib.suppress(CentrifugeError):
             await self._subscribed_future
 
-    async def move_subscribing(
+    async def _move_subscribing(
         self,
         code: int,
         reason: str,
