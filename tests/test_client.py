@@ -4,6 +4,9 @@ import json
 import logging
 import unittest
 import uuid
+import base64
+import hmac
+import hashlib
 from typing import List
 
 from centrifuge import (
@@ -12,13 +15,14 @@ from centrifuge import (
     SubscriptionState,
     PublicationContext,
     SubscribedContext,
-    ClientTokenContext,
-    SubscriptionTokenContext,
     DisconnectedContext,
     UnsubscribedContext,
     JoinContext,
     LeaveContext,
     ConnectedContext,
+    ServerSubscribedContext,
+    ServerPublicationContext,
+    ServerJoinContext,
 )
 
 logging.basicConfig(
@@ -29,6 +33,36 @@ cf_logger = logging.getLogger("centrifuge")
 cf_logger.setLevel(logging.DEBUG)
 
 
+def base64url_encode(data):
+    return base64.urlsafe_b64encode(data).rstrip(b"=")
+
+
+def generate_jwt(user, channel=""):
+    """Note, in tests we generate token on client-side - this is INSECURE
+    and should not be used in production. Tokens must be generated on server-side."""
+    hmac_secret = "secret"  # noqa: S105 - this is just a secret used in tests.
+    header = {"typ": "JWT", "alg": "HS256"}
+    payload = {"sub": user}
+    if channel:
+        # Subscription token
+        payload["channel"] = channel
+    encoded_header = base64url_encode(json.dumps(header).encode("utf-8"))
+    encoded_payload = base64url_encode(json.dumps(payload).encode("utf-8"))
+    signature_base = encoded_header + b"." + encoded_payload
+    signature = hmac.new(hmac_secret.encode("utf-8"), signature_base, hashlib.sha256).digest()
+    encoded_signature = base64url_encode(signature)
+    jwt_token = encoded_header + b"." + encoded_payload + b"." + encoded_signature
+    return jwt_token.decode("utf-8")
+
+
+async def test_get_client_token() -> str:
+    return generate_jwt("42")
+
+
+async def test_get_subscription_token(channel) -> str:
+    return generate_jwt("42", channel)
+
+
 class TestClient(unittest.IsolatedAsyncioTestCase):
     async def test_client_connects_disconnects(self) -> None:
         for use_protobuf in (False, True):
@@ -36,6 +70,7 @@ class TestClient(unittest.IsolatedAsyncioTestCase):
                 client = Client(
                     "ws://localhost:8000/connection/websocket",
                     use_protobuf=use_protobuf,
+                    get_token=test_get_client_token,
                 )
                 await client.connect()
                 await client.ready()
@@ -51,8 +86,9 @@ class TestSubscription(unittest.IsolatedAsyncioTestCase):
                 client = Client(
                     "ws://localhost:8000/connection/websocket",
                     use_protobuf=use_protobuf,
+                    get_token=test_get_client_token,
                 )
-                sub = client.new_subscription("channel")
+                sub = client.new_subscription("channel", get_token=test_get_subscription_token)
                 await client.connect()
                 await sub.subscribe()
                 await sub.ready()
@@ -69,8 +105,11 @@ class TestSubscriptionOperations(unittest.IsolatedAsyncioTestCase):
                 client = Client(
                     "ws://localhost:8000/connection/websocket",
                     use_protobuf=use_protobuf,
+                    get_token=test_get_client_token,
                 )
-                sub = client.new_subscription("channel" + uuid.uuid4().hex)
+                sub = client.new_subscription(
+                    "channel" + uuid.uuid4().hex, get_token=test_get_subscription_token
+                )
                 await client.connect()
                 await sub.subscribe()
                 payload = {"input": "test"}
@@ -99,6 +138,7 @@ class TestPubSub(unittest.IsolatedAsyncioTestCase):
         client = Client(
             "ws://localhost:8000/connection/websocket",
             use_protobuf=use_protobuf,
+            get_token=test_get_client_token,
         )
 
         future = asyncio.Future()
@@ -106,7 +146,9 @@ class TestPubSub(unittest.IsolatedAsyncioTestCase):
         async def on_publication(ctx: PublicationContext) -> None:
             future.set_result(ctx.pub.data)
 
-        sub = client.new_subscription("pub_sub_channel" + uuid.uuid4().hex)
+        sub = client.new_subscription(
+            "pub_sub_channel" + uuid.uuid4().hex, get_token=test_get_subscription_token
+        )
         sub.events.on_publication = on_publication
 
         await client.connect()
@@ -130,11 +172,13 @@ class TestJoinLeave(unittest.IsolatedAsyncioTestCase):
         client1 = Client(
             "ws://localhost:8000/connection/websocket",
             use_protobuf=use_protobuf,
+            get_token=test_get_client_token,
         )
 
         client2 = Client(
             "ws://localhost:8000/connection/websocket",
             use_protobuf=use_protobuf,
+            get_token=test_get_client_token,
         )
 
         join_future = asyncio.Future()
@@ -158,8 +202,8 @@ class TestJoinLeave(unittest.IsolatedAsyncioTestCase):
             leave_future.set_result(ctx.info.client)
 
         channel = "join_leave_channel" + uuid.uuid4().hex
-        sub1 = client1.new_subscription(channel)
-        sub2 = client2.new_subscription(channel)
+        sub1 = client1.new_subscription(channel, get_token=test_get_subscription_token)
+        sub2 = client2.new_subscription(channel, get_token=test_get_subscription_token)
         sub1.events.on_join = on_join
         sub1.events.on_leave = on_leave
 
@@ -185,17 +229,19 @@ class TestAutoRecovery(unittest.IsolatedAsyncioTestCase):
         client1 = Client(
             "ws://localhost:8000/connection/websocket",
             use_protobuf=use_protobuf,
+            get_token=test_get_client_token,
         )
 
         client2 = Client(
             "ws://localhost:8000/connection/websocket",
             use_protobuf=use_protobuf,
+            get_token=test_get_client_token,
         )
 
         # First subscribe both clients to the same channel.
         channel = "recovery_channel" + uuid.uuid4().hex
-        sub1 = client1.new_subscription(channel)
-        sub2 = client2.new_subscription(channel)
+        sub1 = client1.new_subscription(channel, get_token=test_get_subscription_token)
+        sub2 = client2.new_subscription(channel, get_token=test_get_subscription_token)
 
         futures: List[asyncio.Future] = [asyncio.Future() for _ in range(5)]
 
@@ -237,7 +283,7 @@ class TestAutoRecovery(unittest.IsolatedAsyncioTestCase):
         await client2.disconnect()
 
 
-class TestClientToken(unittest.IsolatedAsyncioTestCase):
+class TestClientTokenInvalid(unittest.IsolatedAsyncioTestCase):
     async def test_client_token(self) -> None:
         for use_protobuf in (False, True):
             with self.subTest(use_protobuf=use_protobuf):
@@ -246,14 +292,13 @@ class TestClientToken(unittest.IsolatedAsyncioTestCase):
     async def _test_client_token(self, use_protobuf=False) -> None:
         future = asyncio.Future()
 
-        async def test_get_client_token(ctx: ClientTokenContext) -> str:
-            self.assertEqual(ctx, ClientTokenContext())
+        async def invalid_get_client_token() -> str:
             return "invalid_token"
 
         client = Client(
             "ws://localhost:8000/connection/websocket",
             use_protobuf=use_protobuf,
-            get_token=test_get_client_token,
+            get_token=invalid_get_client_token,
         )
 
         async def on_disconnected(ctx: DisconnectedContext) -> None:
@@ -268,7 +313,7 @@ class TestClientToken(unittest.IsolatedAsyncioTestCase):
         await client.disconnect()
 
 
-class TestSubscriptionToken(unittest.IsolatedAsyncioTestCase):
+class TestSubscriptionTokenInvalid(unittest.IsolatedAsyncioTestCase):
     async def test_client_token(self) -> None:
         for use_protobuf in (False, True):
             with self.subTest(use_protobuf=use_protobuf):
@@ -277,16 +322,17 @@ class TestSubscriptionToken(unittest.IsolatedAsyncioTestCase):
     async def _test_subscription_token(self, use_protobuf=False) -> None:
         future = asyncio.Future()
 
-        async def test_get_subscription_token(ctx: SubscriptionTokenContext) -> str:
-            self.assertEqual(ctx, SubscriptionTokenContext(channel="channel"))
+        async def invalid_get_subscription_token(channel: str) -> str:
+            self.assertEqual(channel, "channel")
             return "invalid_token"
 
         client = Client(
             "ws://localhost:8000/connection/websocket",
             use_protobuf=use_protobuf,
+            get_token=test_get_client_token,
         )
 
-        sub = client.new_subscription("channel", get_token=test_get_subscription_token)
+        sub = client.new_subscription("channel", get_token=invalid_get_subscription_token)
 
         async def on_unsubscribed(ctx: UnsubscribedContext) -> None:
             future.set_result(ctx.code)
@@ -298,4 +344,52 @@ class TestSubscriptionToken(unittest.IsolatedAsyncioTestCase):
         res = await future
         self.assertTrue(res == 103, res)
         self.assertTrue(client.state == ClientState.CONNECTED)
+        await client.disconnect()
+
+
+class TestServerSideSubscriptions(unittest.IsolatedAsyncioTestCase):
+    async def test_server_side_subs(self) -> None:
+        for use_protobuf in (False, True):
+            with self.subTest(use_protobuf=use_protobuf):
+                await self._test_server_side_subs(use_protobuf=use_protobuf)
+
+    async def _test_server_side_subs(self, use_protobuf=False) -> None:
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            use_protobuf=use_protobuf,
+            get_token=test_get_client_token,
+        )
+
+        # First subscribe both clients to the same channel.
+        channel = "#42"
+
+        payload = {"input": "test"}
+        if use_protobuf:
+            payload = json.dumps(payload).encode()
+
+        subscribed_future = asyncio.Future()
+        join_future = asyncio.Future()
+        publication_future = asyncio.Future()
+
+        async def on_subscribed(ctx: ServerSubscribedContext) -> None:
+            subscribed_future.set_result(ctx.channel)
+
+        async def on_join(ctx: ServerJoinContext) -> None:
+            self.assertTrue(ctx.info.client)
+            join_future.set_result(True)
+
+        async def on_publication(ctx: ServerPublicationContext) -> None:
+            self.assertTrue(ctx.pub.data == payload)
+            publication_future.set_result(True)
+
+        client.events.on_subscribed = on_subscribed
+        client.events.on_join = on_join
+        client.events.on_publication = on_publication
+
+        await client.connect()
+        ch = await subscribed_future
+        self.assertEqual(ch, channel)
+        await join_future
+        await client.publish(channel, payload)
+        await publication_future
         await client.disconnect()

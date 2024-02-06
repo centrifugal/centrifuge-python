@@ -178,15 +178,3 @@ class SubscriptionErrorContext:
 
     code: int
     error: Exception
-
-
-@dataclass
-class ClientTokenContext:
-    """ClientTokenContext is a context passed to get_token callback of connection."""
-
-
-@dataclass
-class SubscriptionTokenContext:
-    """SubscriptionTokenContext is a context passed to get_token callback of subscription."""
-
-    channel: str
