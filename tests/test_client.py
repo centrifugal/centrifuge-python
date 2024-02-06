@@ -16,6 +16,9 @@ from centrifuge import (
     SubscriptionTokenContext,
     DisconnectedContext,
     UnsubscribedContext,
+    JoinContext,
+    LeaveContext,
+    ConnectedContext,
 )
 
 logging.basicConfig(
@@ -115,6 +118,61 @@ class TestPubSub(unittest.IsolatedAsyncioTestCase):
         result = await future
         self.assertEqual(result, payload)
         await client.disconnect()
+
+
+class TestJoinLeave(unittest.IsolatedAsyncioTestCase):
+    async def test_join_leave(self) -> None:
+        for use_protobuf in (False, True):
+            with self.subTest(use_protobuf=use_protobuf):
+                await self._test_join_leave(use_protobuf=use_protobuf)
+
+    async def _test_join_leave(self, use_protobuf=False) -> None:
+        client1 = Client(
+            "ws://localhost:8000/connection/websocket",
+            use_protobuf=use_protobuf,
+        )
+
+        client2 = Client(
+            "ws://localhost:8000/connection/websocket",
+            use_protobuf=use_protobuf,
+        )
+
+        join_future = asyncio.Future()
+        leave_future = asyncio.Future()
+
+        client_id = ""
+
+        async def on_connected(ctx: ConnectedContext) -> None:
+            nonlocal client_id
+            client_id = ctx.client
+
+        client1.events.on_connected = on_connected
+
+        async def on_join(ctx: JoinContext) -> None:
+            if ctx.info.client == client_id:
+                # Ignore self join event.
+                return
+            join_future.set_result(ctx.info.client)
+
+        async def on_leave(ctx: LeaveContext) -> None:
+            leave_future.set_result(ctx.info.client)
+
+        channel = "join_leave_channel" + uuid.uuid4().hex
+        sub1 = client1.new_subscription(channel)
+        sub2 = client2.new_subscription(channel)
+        sub1.events.on_join = on_join
+        sub1.events.on_leave = on_leave
+
+        await client1.connect()
+        await sub1.subscribe()
+        await client2.connect()
+        await sub2.subscribe()
+        self.assertTrue(client_id)
+        await join_future
+        await sub2.unsubscribe()
+        await leave_future
+        await client1.disconnect()
+        await client2.disconnect()
 
 
 class TestAutoRecovery(unittest.IsolatedAsyncioTestCase):
