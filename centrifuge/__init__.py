@@ -4,7 +4,6 @@ from .client import Client, ClientState, Subscription, SubscriptionState
 from .contexts import (
     ConnectedContext,
     ConnectingContext,
-    ClientTokenContext,
     DisconnectedContext,
     ErrorContext,
     JoinContext,
@@ -19,7 +18,6 @@ from .contexts import (
     SubscribedContext,
     SubscribingContext,
     SubscriptionErrorContext,
-    SubscriptionTokenContext,
     UnsubscribedContext,
 )
 from .exceptions import (
@@ -50,7 +48,6 @@ __all__ = [
     "ClientEventHandler",
     "ClientInfo",
     "ClientState",
-    "ClientTokenContext",
     "ConnectedContext",
     "ConnectingContext",
     "DisconnectedContext",
@@ -80,7 +77,6 @@ __all__ = [
     "SubscriptionErrorContext",
     "SubscriptionEventHandler",
     "SubscriptionState",
-    "SubscriptionTokenContext",
     "SubscriptionUnsubscribedError",
     "UnauthorizedError",
     "UnsubscribedContext",

@@ -8,7 +8,6 @@ from centrifuge import (
     ClientEventHandler,
     ConnectedContext,
     ConnectingContext,
-    ClientTokenContext,
     DisconnectedContext,
     ErrorContext,
     JoinContext,
@@ -17,7 +16,6 @@ from centrifuge import (
     SubscribedContext,
     SubscribingContext,
     SubscriptionErrorContext,
-    SubscriptionTokenContext,
     UnsubscribedContext,
     SubscriptionEventHandler,
     ServerSubscribedContext,
@@ -37,11 +35,11 @@ cf_logger = logging.getLogger("centrifuge")
 cf_logger.setLevel(logging.DEBUG)
 
 
-async def get_token(ctx: ClientTokenContext) -> str:
+async def get_client_token() -> str:
     # To reject connection raise centrifuge.UnauthorizedError() exception:
     # raise centrifuge.UnauthorizedError()
 
-    logging.info("get connection token called: %s", ctx)
+    logging.info("get client token called")
 
     # REPLACE with your own logic to get token from the backend!
     example_token = (
@@ -51,11 +49,11 @@ async def get_token(ctx: ClientTokenContext) -> str:
     return example_token
 
 
-async def get_subscription_token(ctx: SubscriptionTokenContext) -> str:
+async def get_subscription_token(channel: str) -> str:
     # To reject subscription raise centrifuge.UnauthorizedError() exception:
     # raise centrifuge.UnauthorizedError()
 
-    logging.info("get subscription token called: %s", ctx)
+    logging.info("get subscription token called for channel %s", channel)
 
     # REPLACE with your own logic to get token from the backend!
     example_token = (
@@ -129,7 +127,7 @@ def run_example():
     client = Client(
         "ws://localhost:8000/connection/websocket",
         events=ClientEventLoggerHandler(),
-        get_token=get_token,
+        get_token=get_client_token,
         use_protobuf=False,
     )
 
@@ -178,6 +176,13 @@ def run_example():
     async def shutdown(received_signal):
         logging.info("received exit signal %s...", received_signal.name)
         await client.disconnect()
+
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+
+        logging.info("Cancelling outstanding tasks")
+        await asyncio.gather(*tasks, return_exceptions=True)
         loop.stop()
 
     signals = (signal.SIGTERM, signal.SIGINT)

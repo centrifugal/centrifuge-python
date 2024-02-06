@@ -32,7 +32,6 @@ from centrifuge.codes import (
 from centrifuge.contexts import (
     ConnectedContext,
     ConnectingContext,
-    ClientTokenContext,
     DisconnectedContext,
     ErrorContext,
     JoinContext,
@@ -41,7 +40,6 @@ from centrifuge.contexts import (
     SubscribedContext,
     SubscribingContext,
     SubscriptionErrorContext,
-    SubscriptionTokenContext,
     UnsubscribedContext,
     ServerSubscribedContext,
     ServerPublicationContext,
@@ -131,7 +129,7 @@ class Client:
         address: str,
         events: Optional[ClientEventHandler] = None,
         token: str = "",
-        get_token: Optional[Callable[[ClientTokenContext], Awaitable[str]]] = None,
+        get_token: Optional[Callable[[], Awaitable[str]]] = None,
         use_protobuf: bool = False,
         timeout: float = 5.0,
         max_server_ping_delay: float = 10.0,
@@ -196,7 +194,7 @@ class Client:
         channel: str,
         events: Optional[SubscriptionEventHandler] = None,
         token: str = "",
-        get_token: Optional[Callable[[SubscriptionTokenContext], Awaitable[str]]] = None,
+        get_token: Optional[Callable[[str], Awaitable[str]]] = None,
         data: Optional[Any] = None,
         min_resubscribe_delay=0.1,
         max_resubscribe_delay=10.0,
@@ -308,7 +306,7 @@ class Client:
 
         if not self._token and self._get_token:
             try:
-                token = await self._get_token(ClientTokenContext())
+                token = await self._get_token()
             except Exception as e:
                 if isinstance(e, UnauthorizedError):
                     code = _DisconnectedCode.UNAUTHORIZED
@@ -551,7 +549,7 @@ class Client:
         cmd_id = self._next_command_id()
 
         try:
-            token = await self._get_token(ClientTokenContext())
+            token = await self._get_token()
         except Exception as e:
             if isinstance(e, UnauthorizedError):
                 code = _DisconnectedCode.UNAUTHORIZED
@@ -608,7 +606,7 @@ class Client:
             return
 
         try:
-            token = await sub._get_token(SubscriptionTokenContext(channel=channel))
+            token = await sub._get_token(channel)
         except Exception as e:
             if isinstance(e, UnauthorizedError):
                 code = _UnsubscribedCode.UNAUTHORIZED
@@ -690,7 +688,7 @@ class Client:
 
         if not sub._token and sub._get_token:
             try:
-                token = await sub._get_token(SubscriptionTokenContext(channel=channel))
+                token = await sub._get_token(channel)
             except Exception as e:
                 if isinstance(e, UnauthorizedError):
                     code = _UnsubscribedCode.UNAUTHORIZED
@@ -1347,7 +1345,7 @@ class Subscription:
         channel: str,
         events: Optional[SubscriptionEventHandler] = None,
         token: str = "",
-        get_token: Optional[Callable[[SubscriptionTokenContext], Awaitable[str]]] = None,
+        get_token: Optional[Callable[[str], Awaitable[str]]] = None,
         data: Optional[Any] = None,
         min_resubscribe_delay: float = 0.1,
         max_resubscribe_delay: float = 10.0,

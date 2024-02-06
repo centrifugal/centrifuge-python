@@ -1,4 +1,4 @@
-.PHONY: proto test lint lint-ci
+.PHONY: proto test lint lint-fix lint-ci
 
 dev:
 	pip install -e ".[dev]"
@@ -11,6 +11,9 @@ test:
 
 lint:
 	ruff .
+
+lint-fix:
+	ruff . --fix
 
 lint-ci:
 	ruff . --output-format=github
