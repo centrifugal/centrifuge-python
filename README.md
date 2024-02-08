@@ -1,4 +1,4 @@
-# centrifuge-python (work in progress)
+# centrifuge-python
 
 [![CI](https://github.com/centrifugal/centrifuge-python/actions/workflows/test.yml/badge.svg)](https://github.com/centrifugal/centrifuge-python/actions/workflows/test.yml?query=event%3Apush+branch%3Amaster+workflow%3ATest)
 [![pypi](https://img.shields.io/pypi/v/centrifuge-python.svg)](https://pypi.python.org/pypi/centrifuge-python)
@@ -10,9 +10,7 @@ This is a WebSocket real-time SDK for [Centrifugo](https://github.com/centrifuga
 > [!TIP]
 > If you are looking for Centrifugo [server API](https://centrifugal.dev/docs/server/server_api) client – check out [pycent](https://github.com/centrifugal/pycent) instead.
 
-Before starting to work with this library check out [Centrifugo client SDK API specification](https://centrifugal.dev/docs/transports/client_api) as it contains common information about Centrifugal real-time SDK behavior.
-
-The features implemented by this SDK can be found in [SDK feature matrix](https://centrifugal.dev/docs/transports/client_sdk#sdk-feature-matrix).
+Before starting to work with this library check out [Centrifugo client SDK API specification](https://centrifugal.dev/docs/transports/client_api) as it contains common information about Centrifugal real-time SDK behavior. This SDK supports all major features of Centrifugo client protocol - see [SDK feature matrix](https://centrifugal.dev/docs/transports/client_sdk#sdk-feature-matrix).
 
 ## Install
 
@@ -47,23 +45,6 @@ When using Protobuf protocol:
 
 Event callbacks are called by SDK using `await` internally, the websocket connection read loop is blocked for the time SDK waits for the callback to be executed. This means that if you need to perform long operations in callbacks consider moving the work to a separate coroutine/task to return fast and continue reading data from the websocket.
 
-## Run tests
-
-To run tests, first start Centrifugo server:
-
-```bash
-docker run -p 8000:8000 centrifugo/centrifugo:v5 centrifugo --client_insecure --log_level debug
-```
-
-And then:
-
-```bash
-python -m venv env
-. env/bin/activate
-make dev
-make test
-```
-
 ## Run example
 
 To run [example](https://github.com/centrifugal/centrifuge-python/blob/master/example.py), first start Centrifugo with config like this:
@@ -94,4 +75,27 @@ python -m venv env
 . env/bin/activate
 make dev
 python example.py
+```
+
+## Run tests
+
+To run tests, first start Centrifugo server:
+
+```bash
+docker pull centrifugo/centrifugo:v5
+docker run -d -p 8000:8000 -e CENTRIFUGO_TOKEN_HMAC_SECRET_KEY="secret" -e CENTRIFUGO_PRESENCE=1 \
+-e CENTRIFUGO_JOIN_LEAVE=true -e CENTRIFUGO_FORCE_PUSH_JOIN_LEAVE=true \
+-e CENTRIFUGO_HISTORY_TTL=300s -e CENTRIFUGO_HISTORY_SIZE=100 \
+-e CENTRIFUGO_FORCE_RECOVERY=true -e CENTRIFUGO_USER_SUBSCRIBE_TO_PERSONAL=true \
+-e CENTRIFUGO_ALLOW_PUBLISH_FOR_SUBSCRIBER=true -e CENTRIFUGO_ALLOW_PRESENCE_FOR_SUBSCRIBER=true \
+-e CENTRIFUGO_ALLOW_HISTORY_FOR_SUBSCRIBER=true centrifugo/centrifugo:v5 centrifugo
+```
+
+And then (from cloned repo root):
+
+```bash
+python -m venv env
+. env/bin/activate
+make dev
+make test
 ```

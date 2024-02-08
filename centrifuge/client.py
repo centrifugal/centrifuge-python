@@ -1151,7 +1151,7 @@ class Client:
 
     async def _send_commands(
         self,
-        commands: Union[List[Dict[str, Any]]],
+        commands: List[Dict[str, Any]],
     ) -> None:
         if self._conn is None:
             raise CentrifugeError("connection is not initialized")
