@@ -1,4 +1,4 @@
-# centrifuge-python (work in progress)
+# centrifuge-python
 
 [![CI](https://github.com/centrifugal/centrifuge-python/actions/workflows/test.yml/badge.svg)](https://github.com/centrifugal/centrifuge-python/actions/workflows/test.yml?query=event%3Apush+branch%3Amaster+workflow%3ATest)
 [![pypi](https://img.shields.io/pypi/v/centrifuge-python.svg)](https://pypi.python.org/pypi/centrifuge-python)

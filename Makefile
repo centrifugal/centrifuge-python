@@ -2,6 +2,7 @@
 
 dev:
 	pip install -e ".[dev]"
+	pre-commit install
 
 proto:
 	protoc --python_out=centrifuge/protocol client.proto
