@@ -10,6 +10,7 @@ requires-python = ">=3.8"
 license = "MIT"
 authors = [
     { name = "Alexander Emelin (Centrifugal Labs LTD)", email = "" },
+    { name = "Katant Savelev", email = "" }
 ]
 keywords = [
     "Centrifugo",
