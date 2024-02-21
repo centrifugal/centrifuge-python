@@ -10,7 +10,7 @@ This is a WebSocket real-time SDK for [Centrifugo](https://github.com/centrifuga
 > [!TIP]
 > If you are looking for Centrifugo [server API](https://centrifugal.dev/docs/server/server_api) client – check out [pycent](https://github.com/centrifugal/pycent) instead.
 
-Before starting to work with this library check out [Centrifugo client SDK API specification](https://centrifugal.dev/docs/transports/client_api) as it contains common information about Centrifugal real-time SDK behavior. This SDK supports all major features of Centrifugo client protocol - see [SDK feature matrix](https://centrifugal.dev/docs/transports/client_sdk#sdk-feature-matrix).
+Before starting to work with this library check out Centrifugo [client SDK API specification](https://centrifugal.dev/docs/transports/client_api) as it contains common information about Centrifugal real-time SDK behavior. This SDK supports all major features of Centrifugo client protocol - see [SDK feature matrix](https://centrifugal.dev/docs/transports/client_sdk#sdk-feature-matrix).
 
 ## Install
 
@@ -28,7 +28,7 @@ See [example code](https://github.com/centrifugal/centrifuge-python/blob/master/
 
 ## JSON vs Protobuf protocols
 
-By default, SDK uses JSON protocol. If you want to use Protobuf protocol instead then pass `use_protobuf=True` option.
+By default, SDK uses JSON protocol. If you want to use Protobuf protocol instead then pass `use_protobuf=True` option to `Client` constructor.
 
 When using JSON protocol:
 
