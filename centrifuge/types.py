@@ -37,12 +37,14 @@ class Publication:
         offset: publication offset in channel stream.
         data: published data.
         info: optional client information (i.e. may be None).
+        delta: whether this publication is a delta message or not
     """
 
     offset: int
     data: Any
     info: Optional[ClientInfo]
     tags: Dict[str, str]
+    delta: bool
 
 
 @dataclass

@@ -1,10 +1,14 @@
 import json
-from typing import Union, Iterable, AsyncIterable
+from typing import Union, Iterable, AsyncIterable, TYPE_CHECKING
 
 from google.protobuf.json_format import MessageToDict, ParseDict
 from websockets.typing import Data
 
 import centrifuge.protocol.client_pb2 as protocol
+from centrifuge.fossil import apply_delta
+
+if TYPE_CHECKING:
+    from centrifuge import Publication
 
 
 class _JsonCodec:
@@ -17,6 +21,16 @@ class _JsonCodec:
     @staticmethod
     def decode_replies(data):
         return [json.loads(reply) for reply in data.strip().split("\n")]
+
+    @staticmethod
+    def apply_delta_if_needed(prev_data: bytes, pub: "Publication"):
+        if pub.delta:
+            prev_data = apply_delta(prev_data, pub.data.encode("utf-8"))
+            new_data = prev_data.decode("utf-8")
+        else:
+            prev_data = pub.data.encode("utf-8")
+            new_data = pub.data
+        return new_data, prev_data
 
 
 def _varint_encode(number):
@@ -73,3 +87,13 @@ class _ProtobufCodec:
             reply.ParseFromString(message_bytes)
             replies.append(MessageToDict(reply, preserving_proto_field_name=True))
         return replies
+
+    @staticmethod
+    def apply_delta_if_needed(prev_data: bytes, pub: "Publication"):
+        if pub.delta:
+            prev_data = apply_delta(prev_data, pub.data)
+            new_data = prev_data.decode("utf-8")
+        else:
+            prev_data = pub.data
+            new_data = pub.data.decode("utf-8")
+        return new_data, prev_data

@@ -15,6 +15,7 @@ from typing import (
     Union,
     List,
     Callable,
+    Literal,
 )
 
 import websockets
@@ -201,6 +202,7 @@ class Client:
         positioned: bool = False,
         recoverable: bool = False,
         join_leave: bool = False,
+        delta: Literal["fossil", ""] = "",
     ) -> "Subscription":
         """Creates new subscription to channel. If subscription already exists then
         DuplicateSubscriptionError exception will be raised.
@@ -221,6 +223,7 @@ class Client:
             positioned=positioned,
             recoverable=recoverable,
             join_leave=join_leave,
+            delta=delta,
         )
         self._subs[channel] = sub
         return sub
@@ -782,6 +785,9 @@ class Client:
             subscribe["epoch"] = sub._epoch
             subscribe["offset"] = sub._offset
 
+        if sub._delta:
+            subscribe["delta"] = sub._delta
+
         command = {
             "id": cmd_id,
             "subscribe": subscribe,
@@ -1311,6 +1317,7 @@ class Client:
             data=self._decode_data(pub.get("data")),
             info=client_info,
             tags=pub.get("tags", {}),
+            delta=pub.get("delta", False),
         )
 
 
@@ -1352,6 +1359,7 @@ class Subscription:
         positioned: bool = False,
         recoverable: bool = False,
         join_leave: bool = False,
+        delta: Literal["fossil", ""] = "",
     ) -> None:
         """Initializes Subscription instance.
         Note: use Client.new_subscription method to create new subscriptions in your app.
@@ -1376,6 +1384,12 @@ class Subscription:
         self._recover: bool = False
         self._offset: int = 0
         self._epoch: str = ""
+        self._prev_data: Optional[Any] = None
+
+        if delta not in {"fossil", ""}:
+            raise CentrifugeError("unsupported delta format")
+        self._delta = delta
+        self._delta_negotiated: bool = False
 
     @classmethod
     def _create_instance(cls, *args: Any, **kwargs: Any) -> "Subscription":
@@ -1552,6 +1566,8 @@ class Subscription:
                 lambda: asyncio.ensure_future(self._refresh(), loop=self._client._loop),
             )
 
+        self._delta_negotiated = subscribe.get("delta", False)
+
         await on_subscribed_handler(
             SubscribedContext(
                 channel=self.channel,
@@ -1603,6 +1619,14 @@ class Subscription:
 
     async def _process_publication(self, pub: Any) -> None:
         publication = self._client._publication_from_proto(pub)
+
+        if self._delta and self._delta_negotiated:
+            new_data, prev_data = self._client._codec.apply_delta_if_needed(
+                self._prev_data, publication
+            )
+            publication.data = new_data
+            self._prev_data = prev_data
+
         await self.events.on_publication(PublicationContext(pub=publication))
         if publication.offset > 0:
             self._offset = publication.offset
