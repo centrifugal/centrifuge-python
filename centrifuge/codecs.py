@@ -26,10 +26,10 @@ class _JsonCodec:
     def apply_delta_if_needed(prev_data: bytes, pub: "Publication"):
         if pub.delta:
             prev_data = apply_delta(prev_data, pub.data.encode("utf-8"))
-            new_data = prev_data.decode("utf-8")
+            new_data = json.loads(prev_data)
         else:
             prev_data = pub.data.encode("utf-8")
-            new_data = pub.data
+            new_data = json.loads(pub.data)
         return new_data, prev_data
 
 
@@ -92,8 +92,8 @@ class _ProtobufCodec:
     def apply_delta_if_needed(prev_data: bytes, pub: "Publication"):
         if pub.delta:
             prev_data = apply_delta(prev_data, pub.data)
-            new_data = prev_data.decode("utf-8")
+            new_data = prev_data
         else:
             prev_data = pub.data
-            new_data = pub.data.decode("utf-8")
+            new_data = pub.data
         return new_data, prev_data

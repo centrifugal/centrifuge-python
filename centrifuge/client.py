@@ -15,7 +15,6 @@ from typing import (
     Union,
     List,
     Callable,
-    Literal,
 )
 
 import websockets
@@ -119,6 +118,13 @@ class _ServerSubscription:
     recoverable: bool
 
 
+class DeltaType(Enum):
+    FOSSIL = "fossil"
+
+    def __str__(self) -> str:
+        return self.value
+
+
 class Client:
     """Client is a websocket client to Centrifuge/Centrifugo server."""
 
@@ -202,7 +208,7 @@ class Client:
         positioned: bool = False,
         recoverable: bool = False,
         join_leave: bool = False,
-        delta: Literal["fossil", ""] = "",
+        delta: Optional[DeltaType] = None,
     ) -> "Subscription":
         """Creates new subscription to channel. If subscription already exists then
         DuplicateSubscriptionError exception will be raised.
@@ -786,7 +792,7 @@ class Client:
             subscribe["offset"] = sub._offset
 
         if sub._delta:
-            subscribe["delta"] = sub._delta
+            subscribe["delta"] = sub._delta.value
 
         command = {
             "id": cmd_id,
@@ -1359,7 +1365,7 @@ class Subscription:
         positioned: bool = False,
         recoverable: bool = False,
         join_leave: bool = False,
-        delta: Literal["fossil", ""] = "",
+        delta: Optional[DeltaType] = None,
     ) -> None:
         """Initializes Subscription instance.
         Note: use Client.new_subscription method to create new subscriptions in your app.
@@ -1386,7 +1392,7 @@ class Subscription:
         self._epoch: str = ""
         self._prev_data: Optional[Any] = None
 
-        if delta not in {"fossil", ""}:
+        if delta and delta not in {DeltaType.FOSSIL}:
             raise CentrifugeError("unsupported delta format")
         self._delta = delta
         self._delta_negotiated: bool = False
@@ -1582,12 +1588,8 @@ class Subscription:
 
         publications = subscribe.get("publications", [])
         if publications:
-            on_publication_handler = self.events.on_publication
             for pub in publications:
-                publication = self._client._publication_from_proto(pub)
-                await on_publication_handler(PublicationContext(pub=publication))
-                if publication.offset > 0:
-                    self._offset = publication.offset
+                await self._process_publication(pub)
 
         self._clear_subscribing_state()
 
