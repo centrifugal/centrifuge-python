@@ -9,9 +9,11 @@ import hmac
 import hashlib
 from typing import List
 
+import centrifuge.client
 from centrifuge import (
     Client,
     ClientState,
+    DeltaType,
     SubscriptionState,
     PublicationContext,
     SubscribedContext,
@@ -131,34 +133,63 @@ class TestSubscriptionOperations(unittest.IsolatedAsyncioTestCase):
 class TestPubSub(unittest.IsolatedAsyncioTestCase):
     async def test_pub_sub(self) -> None:
         for use_protobuf in (False, True):
-            with self.subTest(use_protobuf=use_protobuf):
-                await self._test_pub_sub(use_protobuf=use_protobuf)
+            for delta in (None, centrifuge.DeltaType.FOSSIL):
+                with self.subTest(use_protobuf=use_protobuf, delta=delta):
+                    await self._test_pub_sub(use_protobuf=use_protobuf, delta=delta)
 
-    async def _test_pub_sub(self, use_protobuf=False) -> None:
+    async def _test_pub_sub(self, use_protobuf=False, delta=None) -> None:
         client = Client(
             "ws://localhost:8000/connection/websocket",
             use_protobuf=use_protobuf,
             get_token=test_get_client_token,
         )
 
-        future = asyncio.Future()
+        future1 = asyncio.Future()
+        future2 = asyncio.Future()
+        future3 = asyncio.Future()
 
         async def on_publication(ctx: PublicationContext) -> None:
-            future.set_result(ctx.pub.data)
+            if not future1.done():
+                future1.set_result(ctx.pub.data)
+            elif not future2.done():
+                future2.set_result(ctx.pub.data)
+            else:
+                future3.set_result(ctx.pub.data)
 
         sub = client.new_subscription(
-            "pub_sub_channel" + uuid.uuid4().hex, get_token=test_get_subscription_token
+            "pub_sub_channel" + uuid.uuid4().hex,
+            get_token=test_get_subscription_token,
+            delta=delta,
         )
         sub.events.on_publication = on_publication
 
         await client.connect()
         await sub.subscribe()
-        payload = {"input": "test"}
+        payload1 = {
+            "input": "test message which is long enough for fossil "
+            "delta to be applied on the server side."
+        }
         if use_protobuf:
-            payload = json.dumps(payload).encode()
-        await sub.publish(data=payload)
-        result = await future
-        self.assertEqual(result, payload)
+            payload1 = json.dumps(payload1).encode()
+
+        await sub.publish(data=payload1)
+        result = await future1
+        self.assertEqual(result, payload1)
+
+        # let's test fossil delta publishing the same.
+        payload2 = payload1
+        await sub.publish(data=payload2)
+        result = await future2
+        self.assertEqual(result, payload2)
+
+        another_payload = {"input": "hello"}
+        if use_protobuf:
+            another_payload = json.dumps(another_payload).encode()
+
+        await sub.publish(data=another_payload)
+        result = await future3
+        self.assertEqual(result, another_payload)
+
         await client.disconnect()
 
 
@@ -222,10 +253,11 @@ class TestJoinLeave(unittest.IsolatedAsyncioTestCase):
 class TestAutoRecovery(unittest.IsolatedAsyncioTestCase):
     async def test_auto_recovery(self) -> None:
         for use_protobuf in (False, True):
-            with self.subTest(use_protobuf=use_protobuf):
-                await self._test_auto_recovery(use_protobuf=use_protobuf)
+            for delta in (None, DeltaType.FOSSIL):
+                with self.subTest(use_protobuf=use_protobuf, delta=delta):
+                    await self._test_auto_recovery(use_protobuf=use_protobuf, delta=delta)
 
-    async def _test_auto_recovery(self, use_protobuf=False) -> None:
+    async def _test_auto_recovery(self, use_protobuf=False, delta=None) -> None:
         client1 = Client(
             "ws://localhost:8000/connection/websocket",
             use_protobuf=use_protobuf,
@@ -240,10 +272,16 @@ class TestAutoRecovery(unittest.IsolatedAsyncioTestCase):
 
         # First subscribe both clients to the same channel.
         channel = "recovery_channel" + uuid.uuid4().hex
-        sub1 = client1.new_subscription(channel, get_token=test_get_subscription_token)
-        sub2 = client2.new_subscription(channel, get_token=test_get_subscription_token)
+        sub1 = client1.new_subscription(
+            channel, get_token=test_get_subscription_token, delta=delta
+        )
+        sub2 = client2.new_subscription(
+            channel, get_token=test_get_subscription_token, delta=delta
+        )
 
-        futures: List[asyncio.Future] = [asyncio.Future() for _ in range(5)]
+        num_messages = 10
+
+        futures: List[asyncio.Future] = [asyncio.Future() for _ in range(num_messages)]
 
         async def on_publication(ctx: PublicationContext) -> None:
             futures[ctx.pub.offset - 1].set_result(ctx.pub.data)
@@ -263,10 +301,15 @@ class TestAutoRecovery(unittest.IsolatedAsyncioTestCase):
         # Now disconnect client1 and publish some messages using client2.
         await client1.disconnect()
 
-        for _ in range(10):
-            payload = {"input": "test"}
+        payloads = []
+        for i in range(num_messages):
+            if i % 2 == 0:
+                payload = {"input": "I just subscribed to channel " + str(i)}
+            else:
+                payload = {"input": "Hi from Java " + str(i)}
             if use_protobuf:
                 payload = json.dumps(payload).encode()
+            payloads.append(payload)
             await sub2.publish(data=payload)
 
         async def on_subscribed_after_recovery(ctx: SubscribedContext) -> None:
@@ -278,7 +321,9 @@ class TestAutoRecovery(unittest.IsolatedAsyncioTestCase):
         # Now reconnect client1 and check that it receives all missed messages.
         await client1.connect()
         results = await asyncio.gather(*futures)
-        self.assertEqual(len(results), 5)
+        self.assertEqual(len(results), num_messages)
+        for i, result in enumerate(results):
+            self.assertEqual(result, payloads[i])
         await client1.disconnect()
         await client2.disconnect()
 

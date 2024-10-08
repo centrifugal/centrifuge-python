@@ -7,6 +7,7 @@ repos:
       - id: "check-merge-conflict"
       - id: "debug-statements"
       - id: "end-of-file-fixer"
+        exclude: "tests/data/.*"
       - id: "mixed-line-ending"
       - id: "detect-private-key"
       - id: "check-yaml"

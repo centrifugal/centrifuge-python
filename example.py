@@ -135,6 +135,7 @@ def run_example():
         "example:channel",
         events=SubscriptionEventLoggerHandler(),
         get_token=get_subscription_token,
+        # you can pass `delta="fossil"` too
     )
 
     async def run():

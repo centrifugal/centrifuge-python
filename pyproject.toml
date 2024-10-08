@@ -108,7 +108,15 @@ ignore = [
     "PLR2004", # TODO: solve this one, magic value
     "PLR0917", # Aligns with other SDKs.
 ]
-exclude = ["centrifuge/protocol/client_pb2.py"]
+exclude = [
+    "centrifuge/protocol/client_pb2.py",
+    "tests/data/5/delta",
+    "tests/data/5/target",
+    "tests/data/5/origin",
+    "tests/data/4/delta",
+    "tests/data/3/delta",
+    "tests/data/1/delta",
+]
 
 
 [tool.ruff.per-file-ignores]
