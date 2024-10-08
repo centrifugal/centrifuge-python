@@ -307,7 +307,7 @@ class Client:
                 subprotocols=subprotocols,
                 extra_headers=self._headers,
             )
-        except OSError as e:
+        except (OSError, exceptions.WebSocketException) as e:
             handler = self.events.on_error
             await handler(ErrorContext(code=_code_number(_ErrorCode.TRANSPORT_CLOSED), error=e))
             asyncio.ensure_future(self._schedule_reconnect())
