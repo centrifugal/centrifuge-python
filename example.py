@@ -135,7 +135,8 @@ def run_example():
         "example:channel",
         events=SubscriptionEventLoggerHandler(),
         get_token=get_subscription_token,
-        # you can pass `delta="fossil"` too
+        # you can pass `delta=centrifuge.DeltaType.FOSSIL` (should be also enabled on server)
+        # and other options here.
     )
 
     async def run():
