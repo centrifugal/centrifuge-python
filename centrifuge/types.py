@@ -29,7 +29,7 @@ class ClientInfo:
 
 
 @dataclass
-class Publication:
+Publication:
     """Publication represents a data published to channel.
 
     Attributes
@@ -45,6 +45,7 @@ class Publication:
     info: Optional[ClientInfo]
     tags: Dict[str, str]
     delta: bool
+    channel: str
 
 
 @dataclass
