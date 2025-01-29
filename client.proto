@@ -102,7 +102,9 @@ message Publication {
   ClientInfo info = 5;
   uint64 offset = 6;
   map<string, string> tags = 7;
-  bool delta = 8;
+  bool delta = 8;  // When set indicates that data in Publication is a delta from previous data.
+  int64 time = 9;  // Optional time of publication as Unix timestamp milliseconds.
+  string channel = 10; // Optional channel name if Publication relates to wildcard subscription.
 }
 
 message Join {
@@ -143,6 +145,7 @@ message Connect {
   bool pong = 8;
   string session = 9;
   string node = 10;
+  int64 time = 11; // Server time as Unix timestamp in milliseconds (not sent by default).
 }
 
 message Disconnect {
@@ -162,6 +165,7 @@ message ConnectRequest {
   map<string, SubscribeRequest> subs = 3;
   string name = 4;
   string version = 5;
+  map<string, string> headers = 6;
 }
 
 message ConnectResult {
@@ -175,6 +179,7 @@ message ConnectResult {
   bool pong = 8;
   string session = 9;
   string node = 10;
+  int64 time = 11; // Server time as Unix timestamp in milliseconds (not sent by default).
 }
 
 message RefreshRequest {
