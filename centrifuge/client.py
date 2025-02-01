@@ -1203,7 +1203,8 @@ class Client:
             logger.debug("received push reply %s", str(reply))
             push = reply["push"]
             if "pub" in push:
-                await self._process_publication(push["channel"], push["pub"])
+                await self._process_publication(push["channel"],
+                                                dict(push["pub"], **{'channel': push["channel"]}))
             elif "join" in push:
                 await self._process_join(push["channel"], push["join"])
             elif "leave" in push:
@@ -1324,6 +1325,7 @@ class Client:
             info=client_info,
             tags=pub.get("tags", {}),
             delta=pub.get("delta", False),
+            channel=pub.get("channel")
         )
 
 
