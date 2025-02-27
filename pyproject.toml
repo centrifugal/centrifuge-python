@@ -41,7 +41,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "websockets>=11.0.3,<13.0.0",
+    "websockets>=11.0.3",
     "protobuf>=4.23.4,<6.0.0",
 ]
 
