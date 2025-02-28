@@ -163,7 +163,7 @@ class Client:
             _ProtobufCodec,
             _JsonCodec,
         ] = _ProtobufCodec() if use_protobuf else _JsonCodec()
-        self._conn: Optional["WebSocketClientProtocol"] = None
+        self._conn: Optional[ClientConnection] = None
         self._id: int = 0
         self._subs: Dict[str, Subscription] = {}
         self._messages: asyncio.Queue = asyncio.Queue()
