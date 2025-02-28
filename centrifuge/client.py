@@ -20,6 +20,7 @@ from typing import (
 import websockets
 from websockets import exceptions
 from websockets.protocol import State
+from websockets.asyncio.client import ClientConnection
 
 from centrifuge.codecs import _JsonCodec, _ProtobufCodec
 from centrifuge.codes import (
@@ -80,9 +81,6 @@ from centrifuge.utils import (
 )
 
 if TYPE_CHECKING:
-    # Turned out legacy is not really legacy in websockets.
-    # See more in https://websockets.readthedocs.io/en/stable/faq/ (grep "legacy").
-    from websockets.legacy.client import WebSocketClientProtocol
     from asyncio import AbstractEventLoop
 
 logger = logging.getLogger("centrifuge")
@@ -265,7 +263,7 @@ class Client:
         if self.state == ClientState.CONNECTED:
             return
 
-        if self._conn and self._conn.open:
+        if self._conn and self._conn.state == State.OPEN:
             return
 
         if not self._need_reconnect:
@@ -1278,7 +1276,7 @@ class Client:
         if self._conn is None:
             raise CentrifugeError("connection is not initialized")
 
-        while self._conn.open:
+        while self._conn.state == State.OPEN:
             try:
                 result = await self._conn.recv()
                 if result:
