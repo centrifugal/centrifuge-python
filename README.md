@@ -53,20 +53,26 @@ To run [example](https://github.com/centrifugal/centrifuge-python/blob/master/ex
 
 ```json
 {
-  "token_hmac_secret_key": "secret",
-  "namespaces": [
-    {
-      "name": "example",
-      "presence": true,
-      "history_size": 300,
-      "history_ttl": "300s",
-      "join_leave": true,
-      "force_push_join_leave": true,
-      "allow_publish_for_subscriber": true,
-      "allow_presence_for_subscriber": true,
-      "allow_history_for_subscriber": true
+  "client": {
+    "token": {
+      "hmac_secret_key": "secret"
     }
-  ]
+  },
+  "channel": {
+    "namespaces": [
+      {
+        "name": "example",
+        "presence": true,
+        "history_size": 300,
+        "history_ttl": "300s",
+        "join_leave": true,
+        "force_push_join_leave": true,
+        "allow_publish_for_subscriber": true,
+        "allow_presence_for_subscriber": true,
+        "allow_history_for_subscriber": true
+      }
+    ]
+  }
 }
 ```
 
