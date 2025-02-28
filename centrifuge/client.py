@@ -305,7 +305,7 @@ class Client:
             self._conn = await websockets.connect(
                 self._address,
                 subprotocols=subprotocols,
-                extra_headers=self._headers,
+                additional_headers=self._headers,
             )
         except (OSError, exceptions.WebSocketException) as e:
             handler = self.events.on_error
