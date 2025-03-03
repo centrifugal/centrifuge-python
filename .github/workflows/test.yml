@@ -21,6 +21,10 @@ jobs:
         protobuf-version:
           - "4.23.4"
           - "5.29.3"
+        websockets-version:
+          - "11.0.3"
+          - "14.2"
+          - "15.0"
 
     runs-on: ${{ matrix.os }}
 
@@ -43,6 +47,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install "protobuf==${{ matrix.protobuf-version }}"
+          pip install "websockets==${{ matrix.websockets-version }}"
           make dev
 
       - name: Run tests
