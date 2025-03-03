@@ -20,7 +20,6 @@ from typing import (
 import websockets
 from websockets import exceptions
 from websockets.protocol import State
-from websockets.asyncio.client import ClientConnection
 
 from centrifuge.codecs import _JsonCodec, _ProtobufCodec
 from centrifuge.codes import (
@@ -81,6 +80,7 @@ from centrifuge.utils import (
 )
 
 if TYPE_CHECKING:
+    from websockets.asyncio.client import ClientConnection
     from asyncio import AbstractEventLoop
 
 logger = logging.getLogger("centrifuge")
