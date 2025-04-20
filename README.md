@@ -53,20 +53,26 @@ To run [example](https://github.com/centrifugal/centrifuge-python/blob/master/ex
 
 ```json
 {
-  "token_hmac_secret_key": "secret",
-  "namespaces": [
-    {
-      "name": "example",
-      "presence": true,
-      "history_size": 300,
-      "history_ttl": "300s",
-      "join_leave": true,
-      "force_push_join_leave": true,
-      "allow_publish_for_subscriber": true,
-      "allow_presence_for_subscriber": true,
-      "allow_history_for_subscriber": true
+  "client": {
+    "token": {
+      "hmac_secret_key": "secret"
     }
-  ]
+  },
+  "channel": {
+    "namespaces": [
+      {
+        "name": "example",
+        "presence": true,
+        "history_size": 300,
+        "history_ttl": "300s",
+        "join_leave": true,
+        "force_push_join_leave": true,
+        "allow_publish_for_subscriber": true,
+        "allow_presence_for_subscriber": true,
+        "allow_history_for_subscriber": true
+      }
+    ]
+  }
 }
 ```
 
@@ -85,14 +91,22 @@ To run tests, first start Centrifugo server:
 
 ```bash
 docker pull centrifugo/centrifugo:v5
-docker run -d -p 8000:8000 -e CENTRIFUGO_LOG_LEVEL=trace \
--e CENTRIFUGO_TOKEN_HMAC_SECRET_KEY="secret" -e CENTRIFUGO_PRESENCE=true \
--e CENTRIFUGO_JOIN_LEAVE=true -e CENTRIFUGO_FORCE_PUSH_JOIN_LEAVE=true \
--e CENTRIFUGO_HISTORY_TTL=300s -e CENTRIFUGO_HISTORY_SIZE=100 \
--e CENTRIFUGO_DELTA_PUBLISH=true -e CENTRIFUGO_ALLOWED_DELTA_TYPES="fossil" \
--e CENTRIFUGO_FORCE_RECOVERY=true -e CENTRIFUGO_USER_SUBSCRIBE_TO_PERSONAL=true \
--e CENTRIFUGO_ALLOW_PUBLISH_FOR_SUBSCRIBER=true -e CENTRIFUGO_ALLOW_PRESENCE_FOR_SUBSCRIBER=true \
--e CENTRIFUGO_ALLOW_HISTORY_FOR_SUBSCRIBER=true centrifugo/centrifugo:v5 centrifugo
+docker run -d -p 8000:8000 \
+-e CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY="secret" \
+-e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOWED_DELTA_TYPES="fossil" \
+-e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_DELTA_PUBLISH="true" \
+-e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_PRESENCE="true" \
+-e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_JOIN_LEAVE="true" \
+-e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_FORCE_PUSH_JOIN_LEAVE="true" \
+-e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_HISTORY_SIZE="100" \
+-e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_HISTORY_TTL="300s" \
+-e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_FORCE_RECOVERY="true" \
+-e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_PUBLISH_FOR_SUBSCRIBER="true" \
+-e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_PRESENCE_FOR_SUBSCRIBER="true" \
+-e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_HISTORY_FOR_SUBSCRIBER="true" \
+-e CENTRIFUGO_CLIENT_SUBSCRIBE_TO_USER_PERSONAL_CHANNEL_ENABLED="true" \
+-e CENTRIFUGO_LOG_LEVEL="trace" \
+centrifugo/centrifugo:v6 centrifugo
 ```
 
 And then (from cloned repo root):
