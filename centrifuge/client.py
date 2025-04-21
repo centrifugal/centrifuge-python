@@ -82,7 +82,7 @@ from centrifuge.utils import (
 if TYPE_CHECKING:
     # Turned out legacy is not really legacy in websockets.
     # See more in https://websockets.readthedocs.io/en/stable/faq/ (grep "legacy").
-    from websockets.legacy.client import WebSocketClientProtocol
+    from websockets.asyncio.client import ClientConnection
     from asyncio import AbstractEventLoop
 
 logger = logging.getLogger("centrifuge")
@@ -165,7 +165,7 @@ class Client:
             _ProtobufCodec,
             _JsonCodec,
         ] = _ProtobufCodec() if use_protobuf else _JsonCodec()
-        self._conn: Optional["WebSocketClientProtocol"] = None
+        self._conn: Optional["ClientConnection"] = None
         self._id: int = 0
         self._subs: Dict[str, Subscription] = {}
         self._messages: asyncio.Queue = asyncio.Queue()
@@ -265,7 +265,7 @@ class Client:
         if self.state == ClientState.CONNECTED:
             return
 
-        if self._conn and self._conn.open:
+        if self._conn and self._conn.state == State.OPEN:
             return
 
         if not self._need_reconnect:
@@ -305,7 +305,7 @@ class Client:
             self._conn = await websockets.connect(
                 self._address,
                 subprotocols=subprotocols,
-                extra_headers=self._headers,
+                additional_headers=self._headers,
             )
         except (OSError, exceptions.WebSocketException) as e:
             handler = self.events.on_error
@@ -1278,7 +1278,7 @@ class Client:
         if self._conn is None:
             raise CentrifugeError("connection is not initialized")
 
-        while self._conn.open:
+        while self._conn.state == State.OPEN:
             try:
                 result = await self._conn.recv()
                 if result:

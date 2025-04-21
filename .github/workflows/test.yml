@@ -12,7 +12,6 @@ jobs:
         os:
           - ubuntu-latest
         python-version:
-          - "3.8"
           - "3.9"
           - "3.10"
           - "3.11"
@@ -21,6 +20,9 @@ jobs:
         protobuf-version:
           - "4.23.4"
           - "5.29.3"
+        websockets-version:
+          - "14.2"
+          - "15.0"
 
     runs-on: ${{ matrix.os }}
 
@@ -37,12 +39,13 @@ jobs:
         uses: crazy-max/ghaction-setup-docker@v3
 
       - name: Start Centrifugo
-        run: docker run -d -p 8000:8000 -e CENTRIFUGO_TOKEN_HMAC_SECRET_KEY="secret" -e CENTRIFUGO_PRESENCE=true -e CENTRIFUGO_JOIN_LEAVE=true -e CENTRIFUGO_FORCE_PUSH_JOIN_LEAVE=true -e CENTRIFUGO_HISTORY_TTL=300s -e CENTRIFUGO_HISTORY_SIZE=100 -e CENTRIFUGO_FORCE_RECOVERY=true -e CENTRIFUGO_USER_SUBSCRIBE_TO_PERSONAL=true -e CENTRIFUGO_ALLOW_PUBLISH_FOR_SUBSCRIBER=true -e CENTRIFUGO_ALLOW_PRESENCE_FOR_SUBSCRIBER=true -e CENTRIFUGO_ALLOW_HISTORY_FOR_SUBSCRIBER=true -e CENTRIFUGO_DELTA_PUBLISH=true -e CENTRIFUGO_ALLOWED_DELTA_TYPES="fossil" centrifugo/centrifugo:v5 centrifugo
+        run: docker run -d -p 8000:8000 -e CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY="secret" -e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOWED_DELTA_TYPES="fossil" -e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_DELTA_PUBLISH="true" -e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_PRESENCE="true" -e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_JOIN_LEAVE="true" -e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_FORCE_PUSH_JOIN_LEAVE="true" -e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_HISTORY_SIZE="100" -e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_HISTORY_TTL="300s" -e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_FORCE_RECOVERY="true" -e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_PUBLISH_FOR_SUBSCRIBER="true" -e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_PRESENCE_FOR_SUBSCRIBER="true" -e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_HISTORY_FOR_SUBSCRIBER="true" -e CENTRIFUGO_CLIENT_SUBSCRIBE_TO_USER_PERSONAL_CHANNEL_ENABLED="true" -e CENTRIFUGO_LOG_LEVEL="trace" centrifugo/centrifugo:v6 centrifugo
 
       - name: Install dependencies
         run: |
           pip install --upgrade pip
           pip install "protobuf==${{ matrix.protobuf-version }}"
+          pip install "websockets==${{ matrix.websockets-version }}"
           make dev
 
       - name: Run tests
