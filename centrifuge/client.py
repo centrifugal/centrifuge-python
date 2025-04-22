@@ -2,6 +2,7 @@ import asyncio
 import base64
 import contextlib
 import logging
+import ssl
 from asyncio import TimerHandle
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -147,6 +148,7 @@ class Client:
         max_reconnect_delay: float = 20.0,
         headers: Optional[Dict[str, str]] = None,
         loop: Optional["AbstractEventLoop"] = None,
+        ssl_context: Optional[ssl.SSLContext] = None,
     ):
         """Initializes new Client instance.
 
@@ -191,6 +193,7 @@ class Client:
         self._reconnect_timer = None
         self._headers = headers or {}
         self._server_subs: Dict[str, _ServerSubscription] = {}
+        self._ssl_context = ssl_context
 
     def subscriptions(self) -> Dict[str, "Subscription"]:
         """Returns a copy of subscriptions dict."""
@@ -306,6 +309,7 @@ class Client:
                 self._address,
                 subprotocols=subprotocols,
                 additional_headers=self._headers,
+                ssl=self._ssl_context,
             )
         except (OSError, exceptions.WebSocketException) as e:
             handler = self.events.on_error
