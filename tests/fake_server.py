@@ -66,6 +66,7 @@ class FakeCentrifugoServer:
     def __init__(self):
         self._server = None
         self.port = 0
+        self._secure = False
         self._current_ws = None
         # All commands received from the client, in order.
         self.received = []
@@ -78,9 +79,15 @@ class FakeCentrifugoServer:
         # Customize the subscribe result per channel: (channel, req) -> SubscribeResult.
         self.on_subscribe = None
 
-    async def start(self):
+    async def start(self, ssl_context=None):
+        """Start the server. Pass ssl_context to serve wss:// instead of ws://."""
+        self._secure = ssl_context is not None
         self._server = await websockets.serve(
-            self._handler, "localhost", 0, subprotocols=["centrifuge-protobuf"]
+            self._handler,
+            "localhost",
+            0,
+            subprotocols=["centrifuge-protobuf"],
+            ssl=ssl_context,
         )
         self.port = self._server.sockets[0].getsockname()[1]
 
@@ -91,7 +98,8 @@ class FakeCentrifugoServer:
 
     @property
     def url(self):
-        return f"ws://localhost:{self.port}/connection/websocket"
+        scheme = "wss" if self._secure else "ws"
+        return f"{scheme}://localhost:{self.port}/connection/websocket"
 
     def last_subscribe(self):
         """The most recent subscribe request, or None."""
