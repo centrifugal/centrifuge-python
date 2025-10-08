@@ -276,13 +276,13 @@ class Client:
             logger.debug("won't reconnect")
             return
 
-        self.state = ClientState.CONNECTING
-
-        # Cancel existing reconnect timer to prevent timer leaks
+        # Cancel existing reconnect timer to prevent timer leaks and duplicate scheduling
         if self._reconnect_timer:
             logger.debug("canceling existing reconnect timer")
             self._reconnect_timer.cancel()
             self._reconnect_timer = None
+
+        self.state = ClientState.CONNECTING
 
         delay = _backoff(
             self._reconnect_attempts,
@@ -760,6 +760,16 @@ class Client:
                 return False
 
             sub._token = token
+
+        # Re-check client state after async token fetch
+        if self.state != ClientState.CONNECTED:
+            logger.debug("client disconnected during token fetch for %s", channel)
+            return None
+
+        # Re-check subscription state after async token fetch
+        if sub.state != SubscriptionState.SUBSCRIBING:
+            logger.debug("subscription state changed during token fetch for %s", channel)
+            return None
 
         cmd_id = self._next_command_id()
         command = self._construct_subscribe_command(sub, cmd_id)
@@ -1518,6 +1528,8 @@ class Subscription:
 
     async def subscribe(self) -> None:
         if self.state == SubscriptionState.SUBSCRIBING:
+            return
+        if self.state == SubscriptionState.SUBSCRIBED:
             return
 
         self.state = SubscriptionState.SUBSCRIBING
