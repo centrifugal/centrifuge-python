@@ -324,7 +324,9 @@ class Client:
                 )
             except (OSError, exceptions.WebSocketException) as e:
                 handler = self.events.on_error
-                await handler(ErrorContext(code=_code_number(_ErrorCode.TRANSPORT_CLOSED), error=e))
+                await handler(
+                    ErrorContext(code=_code_number(_ErrorCode.TRANSPORT_CLOSED), error=e)
+                )
                 asyncio.ensure_future(self._schedule_reconnect())
                 return False
 
@@ -918,6 +920,9 @@ class Client:
         cb.future.set_exception(exc)
         if cb.done:
             cb.done.set_result(True)
+        # Cancel timeout timer to prevent timer leak
+        if cb.timeout:
+            cb.timeout.cancel()
         del self._inflight_commands[cmd_id]
 
     async def _future_success(self, cmd_id: int, reply):
@@ -1643,6 +1648,12 @@ class Subscription:
     async def _schedule_resubscribe(self) -> None:
         if self.state != SubscriptionState.SUBSCRIBING:
             return
+
+        # Cancel existing resubscribe timer to prevent timer leaks
+        if self._resubscribe_timer:
+            logger.debug("canceling existing resubscribe timer for %s", self.channel)
+            self._resubscribe_timer.cancel()
+            self._resubscribe_timer = None
 
         delay = _backoff(
             self._resubscribe_attempts,

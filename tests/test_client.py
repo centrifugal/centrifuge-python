@@ -26,6 +26,7 @@ from centrifuge import (
     ServerPublicationContext,
     ServerJoinContext,
 )
+from websockets.protocol import State
 
 logging.basicConfig(
     level=logging.INFO,
@@ -481,7 +482,6 @@ class TestConnectionLeak(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.5)
 
             # Count how many connections are still OPEN
-            from websockets.protocol import State
             open_connections = [c for c in connections_created if c.state == State.OPEN]
 
             # There should only be ONE open connection, but the bug causes multiple
@@ -489,8 +489,9 @@ class TestConnectionLeak(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 len(open_connections),
                 1,
-                f"CONNECTION LEAK DETECTED: Expected 1 open connection but found {len(open_connections)}. "
-                f"Total connections created: {len(connections_created)}"
+                f"CONNECTION LEAK DETECTED: Expected 1 open connection but found "
+                f"{len(open_connections)}. Total connections created: "
+                f"{len(connections_created)}",
             )
 
             await client.disconnect()
@@ -527,7 +528,6 @@ class TestConnectionLeak(unittest.IsolatedAsyncioTestCase):
             first_conn = client._conn
 
             # Verify first connection is open
-            from websockets.protocol import State
             self.assertEqual(first_conn.state, State.OPEN)
 
             # Now force a second connection creation without disconnect
@@ -539,8 +539,9 @@ class TestConnectionLeak(unittest.IsolatedAsyncioTestCase):
             second_conn = client._conn
 
             # Verify we created 2 different connections
-            self.assertIsNot(first_conn, second_conn,
-                           "Should have created two different connection objects")
+            self.assertIsNot(
+                first_conn, second_conn, "Should have created two different connection objects"
+            )
 
             # The bug: first connection is still OPEN because it was never closed
             # This assertion SHOULD FAIL, proving the leak
@@ -548,7 +549,7 @@ class TestConnectionLeak(unittest.IsolatedAsyncioTestCase):
                 first_conn.state,
                 State.OPEN,
                 "CONNECTION LEAK: First connection is still OPEN after being replaced! "
-                "It should have been closed before creating the second connection."
+                "It should have been closed before creating the second connection.",
             )
 
             await client.disconnect()
@@ -597,9 +598,9 @@ class TestConnectionLeak(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 len(reconnect_timers),
                 1,
-                f"TIMER LEAK DETECTED: Expected 1 active reconnect timer but found {len(reconnect_timers)}. "
-                f"Multiple _schedule_reconnect() calls created orphaned timers that can cause "
-                f"concurrent reconnection attempts."
+                f"TIMER LEAK DETECTED: Expected 1 active reconnect timer but found "
+                f"{len(reconnect_timers)}. Multiple _schedule_reconnect() calls created "
+                f"orphaned timers that can cause concurrent reconnection attempts.",
             )
 
             # Clean up: cancel all timers
@@ -641,7 +642,7 @@ class TestConnectionLeak(unittest.IsolatedAsyncioTestCase):
 
             # Simulate multiple refresh timer creations using the same pattern as the code
             # This mimics what happens if server sends multiple refresh responses
-            for i in range(3):
+            for _ in range(3):
                 # Cancel existing refresh timer to prevent timer leaks (this is the fix)
                 if client._refresh_timer:
                     client._refresh_timer.cancel()
@@ -658,8 +659,9 @@ class TestConnectionLeak(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 len(new_timers),
                 1,
-                f"REFRESH TIMER LEAK DETECTED: Expected 1 active refresh timer but found {len(new_timers)}. "
-                f"Multiple refresh timer assignments created orphaned timers."
+                f"REFRESH TIMER LEAK DETECTED: Expected 1 active refresh timer but found "
+                f"{len(new_timers)}. Multiple refresh timer assignments created orphaned "
+                f"timers.",
             )
 
             # Clean up
@@ -688,36 +690,98 @@ class TestConnectionLeak(unittest.IsolatedAsyncioTestCase):
 
             # After connection, should have background tasks
             self.assertIsNotNone(
-                getattr(client, '_listen_task', None),
-                "Client should track _listen_task"
+                getattr(client, "_listen_task", None), "Client should track _listen_task"
             )
             self.assertIsNotNone(
-                getattr(client, '_process_messages_task', None),
-                "Client should track _process_messages_task"
+                getattr(client, "_process_messages_task", None),
+                "Client should track _process_messages_task",
             )
 
             # Tasks should not be done yet
-            if hasattr(client, '_listen_task'):
+            if hasattr(client, "_listen_task"):
                 self.assertFalse(
-                    client._listen_task.done(),
-                    "_listen_task should still be running"
+                    client._listen_task.done(), "_listen_task should still be running"
                 )
-            if hasattr(client, '_process_messages_task'):
+            if hasattr(client, "_process_messages_task"):
                 self.assertFalse(
                     client._process_messages_task.done(),
-                    "_process_messages_task should still be running"
+                    "_process_messages_task should still be running",
                 )
 
             await client.disconnect()
 
             # After disconnect, tasks should be done or canceled
-            if hasattr(client, '_listen_task') and client._listen_task:
+            if hasattr(client, "_listen_task") and client._listen_task:
                 await asyncio.sleep(0.1)  # Give tasks time to finish
                 self.assertTrue(
                     client._listen_task.done() or client._listen_task.cancelled(),
-                    "_listen_task should be done or canceled after disconnect"
+                    "_listen_task should be done or canceled after disconnect",
                 )
 
         finally:
             if client.state != centrifuge.client.ClientState.DISCONNECTED:
                 await client.disconnect()
+
+    async def test_subscription_resubscribe_timer_leak(self) -> None:
+        """Test that multiple _schedule_resubscribe() calls don't create orphaned timers.
+
+        This test demonstrates the timer leak issue where calling _schedule_resubscribe()
+        multiple times before the timer fires creates orphaned timers.
+        """
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            get_token=test_get_client_token,
+        )
+
+        sub = client.new_subscription(
+            "test_channel",
+            get_token=test_get_subscription_token,
+            min_resubscribe_delay=1.0,  # Long delay to prevent timers from firing
+        )
+
+        # Track all timers created
+        original_call_later = client._loop.call_later
+        timers_created = []
+
+        def tracking_call_later(delay, callback, *args):
+            timer = original_call_later(delay, callback, *args)
+            timers_created.append(timer)
+            return timer
+
+        client._loop.call_later = tracking_call_later
+
+        try:
+            await client.connect()
+            await sub.subscribe()
+
+            # Set subscription to subscribing state
+            sub.state = centrifuge.SubscriptionState.SUBSCRIBING
+
+            # Track initial timer count
+            initial_count = len(timers_created)
+
+            # Call _schedule_resubscribe() multiple times
+            await sub._schedule_resubscribe()
+            await sub._schedule_resubscribe()
+            await sub._schedule_resubscribe()
+
+            # Count new timers
+            new_timers = [t for t in timers_created[initial_count:] if not t.cancelled()]
+
+            # Should only have ONE active resubscribe timer
+            self.assertEqual(
+                len(new_timers),
+                1,
+                f"RESUBSCRIBE TIMER LEAK DETECTED: Expected 1 active resubscribe timer but "
+                f"found {len(new_timers)}. Multiple _schedule_resubscribe() calls created "
+                f"orphaned timers.",
+            )
+
+            # Clean up
+            for timer in timers_created:
+                if not timer.cancelled():
+                    timer.cancel()
+
+            await client.disconnect()
+        finally:
+            client._loop.call_later = original_call_later
