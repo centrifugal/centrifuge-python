@@ -90,7 +90,7 @@ python example.py
 To run tests, first start Centrifugo server:
 
 ```bash
-docker pull centrifugo/centrifugo:v5
+docker pull centrifugo/centrifugo:v6
 docker run -d -p 8000:8000 \
 -e CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY="secret" \
 -e CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOWED_DELTA_TYPES="fossil" \

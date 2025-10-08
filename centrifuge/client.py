@@ -191,6 +191,7 @@ class Client:
         self._reconnect_timer = None
         self._headers = headers or {}
         self._server_subs: Dict[str, _ServerSubscription] = {}
+        self._connection_lock = asyncio.Lock()
 
     def subscriptions(self) -> Dict[str, "Subscription"]:
         """Returns a copy of subscriptions dict."""
@@ -296,134 +297,140 @@ class Client:
         return self._id
 
     async def _create_connection(self) -> bool:
-        if self.state != ClientState.CONNECTING:
-            return False
-        subprotocols = []
-        if self._use_protobuf:
-            subprotocols = ["centrifuge-protobuf"]
-        try:
-            self._conn = await websockets.connect(
-                self._address,
-                subprotocols=subprotocols,
-                additional_headers=self._headers,
-            )
-        except (OSError, exceptions.WebSocketException) as e:
-            handler = self.events.on_error
-            await handler(ErrorContext(code=_code_number(_ErrorCode.TRANSPORT_CLOSED), error=e))
-            asyncio.ensure_future(self._schedule_reconnect())
-            return False
+        # Use lock to prevent concurrent connection creation
+        async with self._connection_lock:
+            if self.state != ClientState.CONNECTING:
+                return False
 
-        if not self._token and self._get_token:
+            # Close existing connection if any before creating new one to prevent leaks
+            await self._close_transport_conn()
+
+            subprotocols = []
+            if self._use_protobuf:
+                subprotocols = ["centrifuge-protobuf"]
             try:
-                token = await self._get_token()
-            except Exception as e:
-                if isinstance(e, UnauthorizedError):
-                    code = _DisconnectedCode.UNAUTHORIZED
-                    await self._disconnect(_code_number(code), _code_message(code), False)
-                    return False
-                await self._close_transport_conn()
-                handler = self.events.on_error
-                await handler(
-                    ErrorContext(code=_code_number(_ErrorCode.CLIENT_CONNECT_TOKEN), error=e),
+                self._conn = await websockets.connect(
+                    self._address,
+                    subprotocols=subprotocols,
+                    additional_headers=self._headers,
                 )
+            except (OSError, exceptions.WebSocketException) as e:
+                handler = self.events.on_error
+                await handler(ErrorContext(code=_code_number(_ErrorCode.TRANSPORT_CLOSED), error=e))
                 asyncio.ensure_future(self._schedule_reconnect())
                 return False
 
-            self._token = token
-
-        if self.state != ClientState.CONNECTING:
-            return False
-
-        asyncio.ensure_future(self._listen())
-        asyncio.ensure_future(self._process_messages())
-
-        self._delay = self._min_reconnect_delay
-
-        cmd_id = self._next_command_id()
-        command = self._construct_connect_command(cmd_id)
-        async with self._register_future_with_done(cmd_id) as future:
-            await self._send_commands([command])
-
-            try:
-                reply = await future
-            except OperationTimeoutError as e:
-                await self._close_transport_conn()
-                handler = self.events.on_error
-                await handler(ErrorContext(code=_code_number(_ErrorCode.TIMEOUT), error=e))
-                await self._schedule_reconnect()
-                return False
-            except Exception as e:
-                if self.state != ClientState.CONNECTING:
+            if not self._token and self._get_token:
+                try:
+                    token = await self._get_token()
+                except Exception as e:
+                    if isinstance(e, UnauthorizedError):
+                        code = _DisconnectedCode.UNAUTHORIZED
+                        await self._disconnect(_code_number(code), _code_message(code), False)
+                        return False
+                    await self._close_transport_conn()
+                    handler = self.events.on_error
+                    await handler(
+                        ErrorContext(code=_code_number(_ErrorCode.CLIENT_CONNECT_TOKEN), error=e),
+                    )
+                    asyncio.ensure_future(self._schedule_reconnect())
                     return False
-                await self._close_transport_conn()
-                handler = self.events.on_error
-                await handler(
-                    ErrorContext(code=_code_number(_ErrorCode.CONNECT_ERROR), error=e),
-                )
-                await self._schedule_reconnect()
-                return False
+
+                self._token = token
 
             if self.state != ClientState.CONNECTING:
                 return False
 
-            if reply.get("error"):
-                logger.debug("connect reply has error: %s", reply.get("error"))
-                code, message, temporary = self._extract_error_details(reply)
-                if _is_token_expired(code):
-                    temporary = True
-                    self._token = ""
-                if temporary:
+            asyncio.ensure_future(self._listen())
+            asyncio.ensure_future(self._process_messages())
+
+            self._delay = self._min_reconnect_delay
+
+            cmd_id = self._next_command_id()
+            command = self._construct_connect_command(cmd_id)
+            async with self._register_future_with_done(cmd_id) as future:
+                await self._send_commands([command])
+
+                try:
+                    reply = await future
+                except OperationTimeoutError as e:
+                    await self._close_transport_conn()
+                    handler = self.events.on_error
+                    await handler(ErrorContext(code=_code_number(_ErrorCode.TIMEOUT), error=e))
+                    await self._schedule_reconnect()
+                    return False
+                except Exception as e:
+                    if self.state != ClientState.CONNECTING:
+                        return False
                     await self._close_transport_conn()
                     handler = self.events.on_error
                     await handler(
-                        ErrorContext(
-                            code=_code_number(_ErrorCode.CONNECT_ERROR),
-                            error=ReplyError(code, message, temporary),
-                        ),
+                        ErrorContext(code=_code_number(_ErrorCode.CONNECT_ERROR), error=e),
                     )
                     await self._schedule_reconnect()
                     return False
-                else:
-                    await self._disconnect(code, message, False)
-                    return False
-            else:
-                connect = reply["connect"]
-                self.client_id = connect["client"]
-                self.state = ClientState.CONNECTED
-                self._send_pong = connect.get("pong", False)
-                self._ping_interval = connect.get("ping", 0)
-                if self._ping_interval > 0:
-                    self._restart_ping_wait()
 
-                expires = connect.get("expires", False)
-                if expires:
-                    ttl = connect["ttl"]
-                    self._refresh_timer = self._loop.call_later(
-                        ttl,
-                        lambda: asyncio.ensure_future(self._refresh(), loop=self._loop),
+                if self.state != ClientState.CONNECTING:
+                    return False
+
+                if reply.get("error"):
+                    logger.debug("connect reply has error: %s", reply.get("error"))
+                    code, message, temporary = self._extract_error_details(reply)
+                    if _is_token_expired(code):
+                        temporary = True
+                        self._token = ""
+                    if temporary:
+                        await self._close_transport_conn()
+                        handler = self.events.on_error
+                        await handler(
+                            ErrorContext(
+                                code=_code_number(_ErrorCode.CONNECT_ERROR),
+                                error=ReplyError(code, message, temporary),
+                            ),
+                        )
+                        await self._schedule_reconnect()
+                        return False
+                    else:
+                        await self._disconnect(code, message, False)
+                        return False
+                else:
+                    connect = reply["connect"]
+                    self.client_id = connect["client"]
+                    self.state = ClientState.CONNECTED
+                    self._send_pong = connect.get("pong", False)
+                    self._ping_interval = connect.get("ping", 0)
+                    if self._ping_interval > 0:
+                        self._restart_ping_wait()
+
+                    expires = connect.get("expires", False)
+                    if expires:
+                        ttl = connect["ttl"]
+                        self._refresh_timer = self._loop.call_later(
+                            ttl,
+                            lambda: asyncio.ensure_future(self._refresh(), loop=self._loop),
+                        )
+
+                    self._connected_future.set_result(True)
+
+                    handler = self.events.on_connected
+                    await handler(
+                        ConnectedContext(
+                            client=connect.get("client"),
+                            version=connect.get("version", ""),
+                            data=self._decode_data(connect.get("data")),
+                        ),
                     )
 
-                self._connected_future.set_result(True)
+                    self._clear_connecting_state()
 
-                handler = self.events.on_connected
-                await handler(
-                    ConnectedContext(
-                        client=connect.get("client"),
-                        version=connect.get("version", ""),
-                        data=self._decode_data(connect.get("data")),
-                    ),
-                )
+                    channels = self._subs.keys()
+                    for channel in channels:
+                        sub = self._subs[channel]
+                        if not sub or sub.state != SubscriptionState.SUBSCRIBING:
+                            continue
+                        asyncio.ensure_future(self._subscribe(channel))
 
-                self._clear_connecting_state()
-
-                channels = self._subs.keys()
-                for channel in channels:
-                    sub = self._subs[channel]
-                    if not sub or sub.state != SubscriptionState.SUBSCRIBING:
-                        continue
-                    asyncio.ensure_future(self._subscribe(channel))
-
-                await self._process_server_subs(connect.get("subs", {}))
+                    await self._process_server_subs(connect.get("subs", {}))
 
     def _construct_connect_command(self, cmd_id: int) -> Dict[str, Any]:
         connect = {}

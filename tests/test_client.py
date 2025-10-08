@@ -438,3 +438,119 @@ class TestServerSideSubscriptions(unittest.IsolatedAsyncioTestCase):
         await client.publish(channel, payload)
         await publication_future
         await client.disconnect()
+
+
+class TestConnectionLeak(unittest.IsolatedAsyncioTestCase):
+    async def test_concurrent_create_connection_leak(self) -> None:
+        """Test that concurrent _create_connection() calls create multiple WebSocket connections.
+
+        This test demonstrates the connection leak issue where _create_connection()
+        can be called multiple times concurrently (e.g., from reconnect timers),
+        resulting in multiple WebSocket connections without closing previous ones.
+        """
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            get_token=test_get_client_token,
+        )
+
+        # Track all connection objects created
+        original_connect = centrifuge.client.websockets.connect
+        connections_created = []
+
+        async def tracking_connect(*args, **kwargs):
+            conn = await original_connect(*args, **kwargs)
+            connections_created.append(conn)
+            return conn
+
+        # Monkey patch to track connections
+        centrifuge.client.websockets.connect = tracking_connect
+
+        try:
+            # Set state to CONNECTING to bypass connect() protection
+            client.state = centrifuge.client.ClientState.CONNECTING
+
+            # Call _create_connection() multiple times concurrently
+            # This simulates the race condition from multiple reconnect attempts
+            await asyncio.gather(
+                client._create_connection(),
+                client._create_connection(),
+                client._create_connection(),
+            )
+
+            # Wait a bit to ensure all connections are established
+            await asyncio.sleep(0.5)
+
+            # Count how many connections are still OPEN
+            from websockets.protocol import State
+            open_connections = [c for c in connections_created if c.state == State.OPEN]
+
+            # There should only be ONE open connection, but the bug causes multiple
+            # This SHOULD FAIL with the current code showing the leak
+            self.assertEqual(
+                len(open_connections),
+                1,
+                f"CONNECTION LEAK DETECTED: Expected 1 open connection but found {len(open_connections)}. "
+                f"Total connections created: {len(connections_created)}"
+            )
+
+            await client.disconnect()
+        finally:
+            # Restore original
+            centrifuge.client.websockets.connect = original_connect
+
+    async def test_create_connection_overwrites_without_closing(self) -> None:
+        """Test that _create_connection() overwrites self._conn without closing the old one.
+
+        This test directly demonstrates that calling _create_connection() twice
+        will leak the first connection object.
+        """
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            get_token=test_get_client_token,
+        )
+
+        # Track connections
+        original_connect = centrifuge.client.websockets.connect
+        connections_created = []
+
+        async def tracking_connect(*args, **kwargs):
+            conn = await original_connect(*args, **kwargs)
+            connections_created.append(conn)
+            return conn
+
+        centrifuge.client.websockets.connect = tracking_connect
+
+        try:
+            # First connection via normal connect
+            await client.connect()
+            await client.ready()
+            first_conn = client._conn
+
+            # Verify first connection is open
+            from websockets.protocol import State
+            self.assertEqual(first_conn.state, State.OPEN)
+
+            # Now force a second connection creation without disconnect
+            # Simulate what happens in race condition scenarios
+            client.state = centrifuge.client.ClientState.CONNECTING
+            client._connected_future = asyncio.Future()  # Reset the future
+
+            await client._create_connection()
+            second_conn = client._conn
+
+            # Verify we created 2 different connections
+            self.assertIsNot(first_conn, second_conn,
+                           "Should have created two different connection objects")
+
+            # The bug: first connection is still OPEN because it was never closed
+            # This assertion SHOULD FAIL, proving the leak
+            self.assertNotEqual(
+                first_conn.state,
+                State.OPEN,
+                "CONNECTION LEAK: First connection is still OPEN after being replaced! "
+                "It should have been closed before creating the second connection."
+            )
+
+            await client.disconnect()
+        finally:
+            centrifuge.client.websockets.connect = original_connect
