@@ -194,6 +194,7 @@ class Client:
         self._connection_lock = asyncio.Lock()
         self._listen_task: Optional[asyncio.Task] = None
         self._process_messages_task: Optional[asyncio.Task] = None
+        self._disconnecting = False
 
     def subscriptions(self) -> Dict[str, "Subscription"]:
         """Returns a copy of subscriptions dict."""
@@ -330,6 +331,12 @@ class Client:
                 asyncio.ensure_future(self._schedule_reconnect())
                 return False
 
+            # Re-check state after async websockets.connect()
+            if self.state != ClientState.CONNECTING:
+                logger.debug("state changed during websocket connection, closing")
+                await self._close_transport_conn()
+                return False
+
             if not self._token and self._get_token:
                 try:
                     token = await self._get_token()
@@ -348,7 +355,10 @@ class Client:
 
                 self._token = token
 
+            # Re-check state after async get_token()
             if self.state != ClientState.CONNECTING:
+                logger.debug("state changed during token fetch, closing connection")
+                await self._close_transport_conn()
                 return False
 
             # Cancel old background tasks if they exist to prevent task leaks
@@ -387,7 +397,10 @@ class Client:
                     await self._schedule_reconnect()
                     return False
 
+                # Final state check before processing reply
                 if self.state != ClientState.CONNECTING:
+                    logger.debug("state changed while waiting for connect reply, aborting")
+                    await self._close_transport_conn()
                     return False
 
                 if reply.get("error"):
@@ -1125,6 +1138,18 @@ class Client:
             )
 
     async def _disconnect(self, code: int, reason: str, reconnect: bool) -> None:
+        # Prevent recursive/concurrent disconnect calls
+        if self._disconnecting:
+            logger.debug("disconnect already in progress, skipping")
+            return
+        self._disconnecting = True
+
+        try:
+            await self._do_disconnect(code, reason, reconnect)
+        finally:
+            self._disconnecting = False
+
+    async def _do_disconnect(self, code: int, reason: str, reconnect: bool) -> None:
         if self._ping_timer:
             logger.debug("canceling ping timer")
             self._ping_timer.cancel()
@@ -1591,6 +1616,15 @@ class Subscription:
             asyncio.ensure_future(self._client._resubscribe(self))
 
     async def _move_subscribed(self, subscribe: Dict[str, Any]) -> None:
+        # Only transition to SUBSCRIBED from SUBSCRIBING state
+        if self.state != SubscriptionState.SUBSCRIBING:
+            logger.debug(
+                "cannot move to subscribed from state %s for channel %s",
+                self.state,
+                self.channel,
+            )
+            return
+
         self.state = SubscriptionState.SUBSCRIBED
         self._subscribed_future.set_result(True)
         on_subscribed_handler = self.events.on_subscribed
