@@ -554,3 +554,58 @@ class TestConnectionLeak(unittest.IsolatedAsyncioTestCase):
             await client.disconnect()
         finally:
             centrifuge.client.websockets.connect = original_connect
+
+    async def test_multiple_schedule_reconnect_timer_leak(self) -> None:
+        """Test that multiple _schedule_reconnect() calls don't create orphaned timers.
+
+        This test demonstrates the timer leak issue where calling _schedule_reconnect()
+        multiple times before the timer fires creates orphaned timers that can trigger
+        multiple reconnection attempts.
+        """
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            get_token=test_get_client_token,
+            min_reconnect_delay=1.0,  # Long delay to prevent timers from firing during test
+        )
+
+        # Track all timers created
+        original_call_later = client._loop.call_later
+        timers_created = []
+
+        def tracking_call_later(delay, callback, *args):
+            timer = original_call_later(delay, callback, *args)
+            timers_created.append(timer)
+            return timer
+
+        client._loop.call_later = tracking_call_later
+
+        try:
+            # Set up client state to allow reconnect scheduling
+            client.state = centrifuge.client.ClientState.DISCONNECTED
+            client._need_reconnect = True
+
+            # Call _schedule_reconnect() multiple times rapidly
+            await client._schedule_reconnect()
+            await client._schedule_reconnect()
+            await client._schedule_reconnect()
+
+            # Count how many timers were created
+            reconnect_timers = [t for t in timers_created if not t.cancelled()]
+
+            # There should only be ONE active timer, but the bug creates multiple
+            # This assertion SHOULD FAIL, proving the timer leak
+            self.assertEqual(
+                len(reconnect_timers),
+                1,
+                f"TIMER LEAK DETECTED: Expected 1 active reconnect timer but found {len(reconnect_timers)}. "
+                f"Multiple _schedule_reconnect() calls created orphaned timers that can cause "
+                f"concurrent reconnection attempts."
+            )
+
+            # Clean up: cancel all timers
+            for timer in timers_created:
+                if not timer.cancelled():
+                    timer.cancel()
+
+        finally:
+            client._loop.call_later = original_call_later

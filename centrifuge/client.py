@@ -275,6 +275,12 @@ class Client:
 
         self.state = ClientState.CONNECTING
 
+        # Cancel existing reconnect timer to prevent timer leaks
+        if self._reconnect_timer:
+            logger.debug("canceling existing reconnect timer")
+            self._reconnect_timer.cancel()
+            self._reconnect_timer = None
+
         delay = _backoff(
             self._reconnect_attempts,
             self._min_reconnect_delay,
