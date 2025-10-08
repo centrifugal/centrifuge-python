@@ -192,6 +192,8 @@ class Client:
         self._headers = headers or {}
         self._server_subs: Dict[str, _ServerSubscription] = {}
         self._connection_lock = asyncio.Lock()
+        self._listen_task: Optional[asyncio.Task] = None
+        self._process_messages_task: Optional[asyncio.Task] = None
 
     def subscriptions(self) -> Dict[str, "Subscription"]:
         """Returns a copy of subscriptions dict."""
@@ -347,8 +349,15 @@ class Client:
             if self.state != ClientState.CONNECTING:
                 return False
 
-            asyncio.ensure_future(self._listen())
-            asyncio.ensure_future(self._process_messages())
+            # Cancel old background tasks if they exist to prevent task leaks
+            if self._listen_task and not self._listen_task.done():
+                self._listen_task.cancel()
+            if self._process_messages_task and not self._process_messages_task.done():
+                self._process_messages_task.cancel()
+
+            # Track background tasks for proper cleanup
+            self._listen_task = asyncio.ensure_future(self._listen())
+            self._process_messages_task = asyncio.ensure_future(self._process_messages())
 
             self._delay = self._min_reconnect_delay
 
@@ -411,6 +420,9 @@ class Client:
                     expires = connect.get("expires", False)
                     if expires:
                         ttl = connect["ttl"]
+                        # Cancel existing refresh timer to prevent timer leaks
+                        if self._refresh_timer:
+                            self._refresh_timer.cancel()
                         self._refresh_timer = self._loop.call_later(
                             ttl,
                             lambda: asyncio.ensure_future(self._refresh(), loop=self._loop),
@@ -617,6 +629,9 @@ class Client:
         expires = refresh.get("expires", False)
         if expires:
             ttl = refresh["ttl"]
+            # Cancel existing refresh timer to prevent timer leaks
+            if self._refresh_timer:
+                self._refresh_timer.cancel()
             self._refresh_timer = self._loop.call_later(
                 ttl,
                 lambda: asyncio.ensure_future(self._refresh(), loop=self._loop),
@@ -687,6 +702,9 @@ class Client:
         expires = sub_refresh.get("expires", False)
         if expires:
             ttl = sub_refresh["ttl"]
+            # Cancel existing subscription refresh timer to prevent timer leaks
+            if sub._refresh_timer:
+                sub._refresh_timer.cancel()
             sub._refresh_timer = self._loop.call_later(
                 ttl,
                 lambda: asyncio.ensure_future(sub._refresh(), loop=self._loop),
@@ -1111,6 +1129,14 @@ class Client:
             logger.debug("canceling refresh timer")
             self._refresh_timer.cancel()
             self._refresh_timer = None
+
+        # Cancel background tasks to prevent task leaks
+        if self._listen_task and not self._listen_task.done():
+            logger.debug("canceling listen task")
+            self._listen_task.cancel()
+        if self._process_messages_task and not self._process_messages_task.done():
+            logger.debug("canceling process messages task")
+            self._process_messages_task.cancel()
 
         self._clear_connecting_state()
 
@@ -1580,6 +1606,9 @@ class Subscription:
         expires = subscribe.get("expires", False)
         if expires:
             ttl = subscribe["ttl"]
+            # Cancel existing subscription refresh timer to prevent timer leaks
+            if self._refresh_timer:
+                self._refresh_timer.cancel()
             self._refresh_timer = self._client._loop.call_later(
                 ttl,
                 lambda: asyncio.ensure_future(self._refresh(), loop=self._client._loop),
