@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import signal
-import time
 
 from centrifuge import (
     CentrifugeError,
@@ -113,8 +112,6 @@ class SubscriptionEventLoggerHandler(SubscriptionEventHandler):
 
     async def on_publication(self, ctx: PublicationContext) -> None:
         logging.info("publication: %s", ctx.pub.data)
-        time.sleep(10)
-        logging.info("publication processed "+ str(ctx.pub.offset))
 
     async def on_join(self, ctx: JoinContext) -> None:
         logging.info("join: %s", ctx)

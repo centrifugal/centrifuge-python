@@ -364,8 +364,12 @@ class Client:
             # Cancel old background tasks if they exist to prevent task leaks
             if self._listen_task and not self._listen_task.done():
                 self._listen_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._listen_task
             if self._process_messages_task and not self._process_messages_task.done():
                 self._process_messages_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._process_messages_task
 
             # Track background tasks for proper cleanup
             self._listen_task = asyncio.ensure_future(self._listen())
@@ -1174,9 +1178,13 @@ class Client:
         if self._listen_task and not self._listen_task.done():
             logger.debug("canceling listen task")
             self._listen_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._listen_task
         if self._process_messages_task and not self._process_messages_task.done():
             logger.debug("canceling process messages task")
             self._process_messages_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._process_messages_task
 
         self._clear_connecting_state()
 
@@ -1250,7 +1258,14 @@ class Client:
         commands = self._codec.encode_commands(commands)
         try:
             await self._conn.send(commands)
-        except exceptions.ConnectionClosed:
+        except exceptions.ConnectionClosed as e:
+            logger.debug("connection closed with error during send: %s", e)
+            code = _ConnectingCode.TRANSPORT_CLOSED
+            await self._disconnect(_code_number(code), _code_message(code), True)
+        except exceptions.ProtocolError as e:
+            logger.error("protocol error during send: %s", e)
+            handler = self.events.on_error
+            await handler(ErrorContext(code=_code_number(_ErrorCode.TRANSPORT_CLOSED), error=e))
             code = _ConnectingCode.TRANSPORT_CLOSED
             await self._disconnect(_code_number(code), _code_message(code), True)
 
@@ -1363,7 +1378,11 @@ class Client:
                 if result:
                     logger.debug("data received %s", result)
                     await self._messages.put(result)
-            except exceptions.ConnectionClosed:
+            except exceptions.ConnectionClosed as e:
+                logger.debug("connection closed with error during recv: %s", e)
+                break
+            except exceptions.ProtocolError as e:
+                logger.error("protocol error during recv: %s", e)
                 break
 
         logger.debug("stop reading connection")
