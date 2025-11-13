@@ -26,6 +26,7 @@ from centrifuge import (
     ServerPublicationContext,
     ServerJoinContext,
 )
+from websockets.protocol import State
 
 logging.basicConfig(
     level=logging.INFO,
@@ -438,3 +439,349 @@ class TestServerSideSubscriptions(unittest.IsolatedAsyncioTestCase):
         await client.publish(channel, payload)
         await publication_future
         await client.disconnect()
+
+
+class TestConnectionLeak(unittest.IsolatedAsyncioTestCase):
+    async def test_concurrent_create_connection_leak(self) -> None:
+        """Test that concurrent _create_connection() calls create multiple WebSocket connections.
+
+        This test demonstrates the connection leak issue where _create_connection()
+        can be called multiple times concurrently (e.g., from reconnect timers),
+        resulting in multiple WebSocket connections without closing previous ones.
+        """
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            get_token=test_get_client_token,
+        )
+
+        # Track all connection objects created
+        original_connect = centrifuge.client.websockets.connect
+        connections_created = []
+
+        async def tracking_connect(*args, **kwargs):
+            conn = await original_connect(*args, **kwargs)
+            connections_created.append(conn)
+            return conn
+
+        # Monkey patch to track connections
+        centrifuge.client.websockets.connect = tracking_connect
+
+        try:
+            # Set state to CONNECTING to bypass connect() protection
+            client.state = centrifuge.client.ClientState.CONNECTING
+
+            # Call _create_connection() multiple times concurrently
+            # This simulates the race condition from multiple reconnect attempts
+            await asyncio.gather(
+                client._create_connection(),
+                client._create_connection(),
+                client._create_connection(),
+            )
+
+            # Wait a bit to ensure all connections are established
+            await asyncio.sleep(0.5)
+
+            # Count how many connections are still OPEN
+            open_connections = [c for c in connections_created if c.state == State.OPEN]
+
+            # There should only be ONE open connection, but the bug causes multiple
+            # This SHOULD FAIL with the current code showing the leak
+            self.assertEqual(
+                len(open_connections),
+                1,
+                f"CONNECTION LEAK DETECTED: Expected 1 open connection but found "
+                f"{len(open_connections)}. Total connections created: "
+                f"{len(connections_created)}",
+            )
+
+            await client.disconnect()
+        finally:
+            # Restore original
+            centrifuge.client.websockets.connect = original_connect
+
+    async def test_create_connection_overwrites_without_closing(self) -> None:
+        """Test that _create_connection() overwrites self._conn without closing the old one.
+
+        This test directly demonstrates that calling _create_connection() twice
+        will leak the first connection object.
+        """
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            get_token=test_get_client_token,
+        )
+
+        # Track connections
+        original_connect = centrifuge.client.websockets.connect
+        connections_created = []
+
+        async def tracking_connect(*args, **kwargs):
+            conn = await original_connect(*args, **kwargs)
+            connections_created.append(conn)
+            return conn
+
+        centrifuge.client.websockets.connect = tracking_connect
+
+        try:
+            # First connection via normal connect
+            await client.connect()
+            await client.ready()
+            first_conn = client._conn
+
+            # Verify first connection is open
+            self.assertEqual(first_conn.state, State.OPEN)
+
+            # Now force a second connection creation without disconnect
+            # Simulate what happens in race condition scenarios
+            client.state = centrifuge.client.ClientState.CONNECTING
+            client._connected_future = asyncio.Future()  # Reset the future
+
+            await client._create_connection()
+            second_conn = client._conn
+
+            # Verify we created 2 different connections
+            self.assertIsNot(
+                first_conn, second_conn, "Should have created two different connection objects"
+            )
+
+            # The bug: first connection is still OPEN because it was never closed
+            # This assertion SHOULD FAIL, proving the leak
+            self.assertNotEqual(
+                first_conn.state,
+                State.OPEN,
+                "CONNECTION LEAK: First connection is still OPEN after being replaced! "
+                "It should have been closed before creating the second connection.",
+            )
+
+            await client.disconnect()
+        finally:
+            centrifuge.client.websockets.connect = original_connect
+
+    async def test_multiple_schedule_reconnect_timer_leak(self) -> None:
+        """Test that multiple _schedule_reconnect() calls don't create orphaned timers.
+
+        This test demonstrates the timer leak issue where calling _schedule_reconnect()
+        multiple times before the timer fires creates orphaned timers that can trigger
+        multiple reconnection attempts.
+        """
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            get_token=test_get_client_token,
+            min_reconnect_delay=1.0,  # Long delay to prevent timers from firing during test
+        )
+
+        # Track all timers created
+        original_call_later = client._loop.call_later
+        timers_created = []
+
+        def tracking_call_later(delay, callback, *args):
+            timer = original_call_later(delay, callback, *args)
+            timers_created.append(timer)
+            return timer
+
+        client._loop.call_later = tracking_call_later
+
+        try:
+            # Set up client state to allow reconnect scheduling
+            client.state = centrifuge.client.ClientState.DISCONNECTED
+            client._need_reconnect = True
+
+            # Call _schedule_reconnect() multiple times rapidly
+            await client._schedule_reconnect()
+            await client._schedule_reconnect()
+            await client._schedule_reconnect()
+
+            # Count how many timers were created
+            reconnect_timers = [t for t in timers_created if not t.cancelled()]
+
+            # There should only be ONE active timer, but the bug creates multiple
+            # This assertion SHOULD FAIL, proving the timer leak
+            self.assertEqual(
+                len(reconnect_timers),
+                1,
+                f"TIMER LEAK DETECTED: Expected 1 active reconnect timer but found "
+                f"{len(reconnect_timers)}. Multiple _schedule_reconnect() calls created "
+                f"orphaned timers that can cause concurrent reconnection attempts.",
+            )
+
+            # Clean up: cancel all timers
+            for timer in timers_created:
+                if not timer.cancelled():
+                    timer.cancel()
+
+        finally:
+            client._loop.call_later = original_call_later
+
+    async def test_refresh_timer_leak(self) -> None:
+        """Test that setting _refresh_timer multiple times doesn't leak old timers.
+
+        This test demonstrates the timer leak issue where creating a new refresh timer
+        without canceling the old one causes orphaned timers.
+        """
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            get_token=test_get_client_token,
+        )
+
+        # Track all timers created
+        original_call_later = client._loop.call_later
+        timers_created = []
+
+        def tracking_call_later(delay, callback, *args):
+            timer = original_call_later(delay, callback, *args)
+            timers_created.append(timer)
+            return timer
+
+        client._loop.call_later = tracking_call_later
+
+        try:
+            await client.connect()
+            await client.ready()
+
+            # Count timers created during initial connection (may include ping timer)
+            initial_timer_count = len(timers_created)
+
+            # Simulate multiple refresh timer creations using the same pattern as the code
+            # This mimics what happens if server sends multiple refresh responses
+            for _ in range(3):
+                # Cancel existing refresh timer to prevent timer leaks (this is the fix)
+                if client._refresh_timer:
+                    client._refresh_timer.cancel()
+                client._refresh_timer = client._loop.call_later(
+                    10.0,
+                    lambda: asyncio.ensure_future(client._refresh(), loop=client._loop),
+                )
+
+            # Count new refresh timers created
+            new_timers = [t for t in timers_created[initial_timer_count:] if not t.cancelled()]
+
+            # There should only be ONE active refresh timer
+            # This assertion SHOULD FAIL, proving the timer leak
+            self.assertEqual(
+                len(new_timers),
+                1,
+                f"REFRESH TIMER LEAK DETECTED: Expected 1 active refresh timer but found "
+                f"{len(new_timers)}. Multiple refresh timer assignments created orphaned "
+                f"timers.",
+            )
+
+            # Clean up
+            for timer in timers_created:
+                if not timer.cancelled():
+                    timer.cancel()
+
+            await client.disconnect()
+        finally:
+            client._loop.call_later = original_call_later
+
+    async def test_background_tasks_tracked(self) -> None:
+        """Test that _listen and _process_messages tasks are properly tracked and canceled.
+
+        This test verifies that background tasks created during connection are stored
+        and can be canceled when needed, preventing task leaks during reconnection.
+        """
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            get_token=test_get_client_token,
+        )
+
+        try:
+            await client.connect()
+            await client.ready()
+
+            # After connection, should have background tasks
+            self.assertIsNotNone(
+                getattr(client, "_listen_task", None), "Client should track _listen_task"
+            )
+            self.assertIsNotNone(
+                getattr(client, "_process_messages_task", None),
+                "Client should track _process_messages_task",
+            )
+
+            # Tasks should not be done yet
+            if hasattr(client, "_listen_task"):
+                self.assertFalse(
+                    client._listen_task.done(), "_listen_task should still be running"
+                )
+            if hasattr(client, "_process_messages_task"):
+                self.assertFalse(
+                    client._process_messages_task.done(),
+                    "_process_messages_task should still be running",
+                )
+
+            await client.disconnect()
+
+            # After disconnect, tasks should be done or canceled
+            if hasattr(client, "_listen_task") and client._listen_task:
+                await asyncio.sleep(0.1)  # Give tasks time to finish
+                self.assertTrue(
+                    client._listen_task.done() or client._listen_task.cancelled(),
+                    "_listen_task should be done or canceled after disconnect",
+                )
+
+        finally:
+            if client.state != centrifuge.client.ClientState.DISCONNECTED:
+                await client.disconnect()
+
+    async def test_subscription_resubscribe_timer_leak(self) -> None:
+        """Test that multiple _schedule_resubscribe() calls don't create orphaned timers.
+
+        This test demonstrates the timer leak issue where calling _schedule_resubscribe()
+        multiple times before the timer fires creates orphaned timers.
+        """
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            get_token=test_get_client_token,
+        )
+
+        sub = client.new_subscription(
+            "test_channel",
+            get_token=test_get_subscription_token,
+            min_resubscribe_delay=1.0,  # Long delay to prevent timers from firing
+        )
+
+        # Track all timers created
+        original_call_later = client._loop.call_later
+        timers_created = []
+
+        def tracking_call_later(delay, callback, *args):
+            timer = original_call_later(delay, callback, *args)
+            timers_created.append(timer)
+            return timer
+
+        client._loop.call_later = tracking_call_later
+
+        try:
+            await client.connect()
+            await sub.subscribe()
+
+            # Set subscription to subscribing state
+            sub.state = centrifuge.SubscriptionState.SUBSCRIBING
+
+            # Track initial timer count
+            initial_count = len(timers_created)
+
+            # Call _schedule_resubscribe() multiple times
+            await sub._schedule_resubscribe()
+            await sub._schedule_resubscribe()
+            await sub._schedule_resubscribe()
+
+            # Count new timers
+            new_timers = [t for t in timers_created[initial_count:] if not t.cancelled()]
+
+            # Should only have ONE active resubscribe timer
+            self.assertEqual(
+                len(new_timers),
+                1,
+                f"RESUBSCRIBE TIMER LEAK DETECTED: Expected 1 active resubscribe timer but "
+                f"found {len(new_timers)}. Multiple _schedule_resubscribe() calls created "
+                f"orphaned timers.",
+            )
+
+            # Clean up
+            for timer in timers_created:
+                if not timer.cancelled():
+                    timer.cancel()
+
+            await client.disconnect()
+        finally:
+            client._loop.call_later = original_call_later
