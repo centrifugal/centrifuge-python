@@ -812,7 +812,7 @@ class TestDeprecatedLoopParameter(unittest.IsolatedAsyncioTestCase):
 
         original_call_later = client._loop.call_later
 
-        def capturing_call_later(delay, callback, *args):
+        def capturing_call_later(_delay, callback, *args):
             captured_callbacks.append(callback)
             return original_call_later(999999, callback, *args)
 
@@ -866,7 +866,7 @@ class TestDeprecatedLoopParameter(unittest.IsolatedAsyncioTestCase):
 
         original_call_later = client._loop.call_later
 
-        def capturing_call_later(delay, callback, *args):
+        def capturing_call_later(_delay, callback, *args):
             captured_callbacks.append(callback)
             return original_call_later(999999, callback, *args)
 
@@ -916,7 +916,7 @@ class TestDeprecatedLoopParameter(unittest.IsolatedAsyncioTestCase):
 
         original_call_later = client._loop.call_later
 
-        def capturing_call_later(delay, callback, *args):
+        def capturing_call_later(_delay, callback, *args):
             captured_callbacks.append(callback)
             return original_call_later(999999, callback, *args)
 
