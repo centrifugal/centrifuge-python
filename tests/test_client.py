@@ -648,7 +648,7 @@ class TestConnectionLeak(unittest.IsolatedAsyncioTestCase):
                     client._refresh_timer.cancel()
                 client._refresh_timer = client._loop.call_later(
                     10.0,
-                    lambda: asyncio.ensure_future(client._refresh(), loop=client._loop),
+                    lambda: asyncio.ensure_future(client._refresh()),
                 )
 
             # Count new refresh timers created

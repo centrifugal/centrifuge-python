@@ -444,7 +444,7 @@ class Client:
                             self._refresh_timer.cancel()
                         self._refresh_timer = self._loop.call_later(
                             ttl,
-                            lambda: asyncio.ensure_future(self._refresh(), loop=self._loop),
+                            lambda: asyncio.ensure_future(self._refresh()),
                         )
 
                     self._connected_future.set_result(True)
@@ -653,7 +653,7 @@ class Client:
                 self._refresh_timer.cancel()
             self._refresh_timer = self._loop.call_later(
                 ttl,
-                lambda: asyncio.ensure_future(self._refresh(), loop=self._loop),
+                lambda: asyncio.ensure_future(self._refresh()),
             )
 
     async def _sub_refresh(self, channel: str):
@@ -726,7 +726,7 @@ class Client:
                 sub._refresh_timer.cancel()
             sub._refresh_timer = self._loop.call_later(
                 ttl,
-                lambda: asyncio.ensure_future(sub._refresh(), loop=self._loop),
+                lambda: asyncio.ensure_future(sub._refresh()),
             )
 
     @staticmethod
@@ -1238,7 +1238,7 @@ class Client:
             self._ping_timer.cancel()
         self._ping_timer = self._loop.call_later(
             self._ping_interval + self._max_server_ping_delay,
-            lambda: asyncio.ensure_future(self._no_ping(), loop=self._loop),
+            lambda: asyncio.ensure_future(self._no_ping()),
         )
 
     async def _handle_ping(self) -> None:
@@ -1681,7 +1681,7 @@ class Subscription:
                 self._refresh_timer.cancel()
             self._refresh_timer = self._client._loop.call_later(
                 ttl,
-                lambda: asyncio.ensure_future(self._refresh(), loop=self._client._loop),
+                lambda: asyncio.ensure_future(self._refresh()),
             )
 
         self._delta_negotiated = subscribe.get("delta", False)
