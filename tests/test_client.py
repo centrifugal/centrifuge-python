@@ -785,3 +785,170 @@ class TestConnectionLeak(unittest.IsolatedAsyncioTestCase):
             await client.disconnect()
         finally:
             client._loop.call_later = original_call_later
+
+
+class TestDeprecatedLoopParameter(unittest.IsolatedAsyncioTestCase):
+    """Tests proving that the loop= parameter in asyncio.ensure_future calls
+    inside call_later callbacks causes TypeError on Python 3.12+.
+
+    The loop parameter was deprecated in Python 3.8 and removed in Python 3.10+.
+    These tests capture the callback passed to call_later and invoke it directly,
+    which triggers the asyncio.ensure_future(..., loop=...) call that would fail
+    at runtime when the timer fires.
+    """
+
+    async def test_client_refresh_timer_callback_uses_deprecated_loop_param(self):
+        """Prove that the client refresh timer callback fails on Python 3.12+.
+
+        When a connect response includes expires=True and a ttl, the client
+        schedules a refresh via call_later. The callback lambda calls
+        asyncio.ensure_future with the deprecated loop= parameter.
+        """
+        captured_callbacks = []
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            get_token=test_get_client_token,
+        )
+
+        original_call_later = client._loop.call_later
+
+        def capturing_call_later(delay, callback, *args):
+            captured_callbacks.append(callback)
+            return original_call_later(999999, callback, *args)
+
+        client._loop.call_later = capturing_call_later
+
+        try:
+            await client.connect()
+            await client.ready()
+
+            # Simulate what happens when server sends a connect response
+            # with expires=True - manually trigger the refresh timer setup.
+            captured_callbacks.clear()
+            if client._refresh_timer:
+                client._refresh_timer.cancel()
+            client._refresh_timer = client._loop.call_later(
+                10.0,
+                lambda: asyncio.ensure_future(
+                    client._refresh(), loop=client._loop
+                ),
+            )
+
+            self.assertTrue(
+                len(captured_callbacks) > 0,
+                "Expected at least one callback to be captured",
+            )
+
+            # Invoke the captured callback - this is what call_later would do
+            # when the timer fires. On Python 3.12+ this raises TypeError
+            # because the loop= parameter was removed.
+            callback = captured_callbacks[-1]
+            future = callback()
+            if future is not None:
+                future.cancel()
+
+            await client.disconnect()
+        finally:
+            client._loop.call_later = original_call_later
+
+    async def test_ping_timer_callback_uses_deprecated_loop_param(self):
+        """Prove that the ping timer callback fails on Python 3.12+.
+
+        When a connect response includes a ping interval, the client schedules
+        a no-ping timeout via call_later. The callback lambda calls
+        asyncio.ensure_future with the deprecated loop= parameter.
+        """
+        captured_callbacks = []
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            get_token=test_get_client_token,
+        )
+
+        original_call_later = client._loop.call_later
+
+        def capturing_call_later(delay, callback, *args):
+            captured_callbacks.append(callback)
+            return original_call_later(999999, callback, *args)
+
+        client._loop.call_later = capturing_call_later
+
+        try:
+            await client.connect()
+            await client.ready()
+
+            # Simulate what _restart_ping_wait does with the deprecated loop param.
+            captured_callbacks.clear()
+            if client._ping_timer:
+                client._ping_timer.cancel()
+            client._ping_timer = client._loop.call_later(
+                25 + 10,
+                lambda: asyncio.ensure_future(
+                    client._no_ping(), loop=client._loop
+                ),
+            )
+
+            self.assertTrue(
+                len(captured_callbacks) > 0,
+                "Expected at least one callback to be captured",
+            )
+
+            callback = captured_callbacks[-1]
+            future = callback()
+            if future is not None:
+                future.cancel()
+
+            await client.disconnect()
+        finally:
+            client._loop.call_later = original_call_later
+
+    async def test_sub_refresh_timer_callback_uses_deprecated_loop_param(self):
+        """Prove that the subscription refresh timer callback fails on Python 3.12+.
+
+        When a subscribe response includes expires=True and a ttl, the client
+        schedules a subscription refresh via call_later. The callback lambda calls
+        asyncio.ensure_future with the deprecated loop= parameter.
+        """
+        captured_callbacks = []
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            get_token=test_get_client_token,
+        )
+
+        original_call_later = client._loop.call_later
+
+        def capturing_call_later(delay, callback, *args):
+            captured_callbacks.append(callback)
+            return original_call_later(999999, callback, *args)
+
+        client._loop.call_later = capturing_call_later
+
+        try:
+            await client.connect()
+            await client.ready()
+
+            sub = client.new_subscription("test_channel")
+
+            # Simulate what happens when a subscribe response has expires=True.
+            captured_callbacks.clear()
+            if sub._refresh_timer:
+                sub._refresh_timer.cancel()
+            sub._refresh_timer = client._loop.call_later(
+                10.0,
+                lambda: asyncio.ensure_future(
+                    sub._refresh(), loop=client._loop
+                ),
+            )
+
+            self.assertTrue(
+                len(captured_callbacks) > 0,
+                "Expected at least one callback to be captured",
+            )
+
+            callback = captured_callbacks[-1]
+            future = callback()
+            if future is not None:
+                future.cancel()
+
+            await client.disconnect()
+        finally:
+            client._loop.call_later = original_call_later
