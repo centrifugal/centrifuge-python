@@ -1,4 +1,3 @@
-# Configure logging.
 import asyncio
 import json
 import logging
@@ -18,13 +17,19 @@ from centrifuge import (
     PublicationContext,
     SubscribedContext,
     DisconnectedContext,
+    ConnectingContext,
     UnsubscribedContext,
+    SubscribingContext,
     JoinContext,
     LeaveContext,
     ConnectedContext,
     ServerSubscribedContext,
     ServerPublicationContext,
     ServerJoinContext,
+    DuplicateSubscriptionError,
+    CentrifugeError,
+    UnauthorizedError,
+    StreamPosition,
 )
 from websockets.protocol import State
 
@@ -47,7 +52,6 @@ def generate_jwt(user, channel=""):
     header = {"typ": "JWT", "alg": "HS256"}
     payload = {"sub": user}
     if channel:
-        # Subscription token
         payload["channel"] = channel
     encoded_header = base64url_encode(json.dumps(header).encode("utf-8"))
     encoded_payload = base64url_encode(json.dumps(payload).encode("utf-8"))
@@ -82,6 +86,23 @@ class TestClient(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(client.state == ClientState.DISCONNECTED)
 
 
+class TestConnectDisconnectLoop(unittest.IsolatedAsyncioTestCase):
+    async def test_connect_disconnect_loop(self) -> None:
+        for use_protobuf in (False, True):
+            with self.subTest(use_protobuf=use_protobuf):
+                client = Client(
+                    "ws://localhost:8000/connection/websocket",
+                    use_protobuf=use_protobuf,
+                    get_token=test_get_client_token,
+                )
+                for _ in range(3):
+                    await client.connect()
+                    await client.ready()
+                    self.assertEqual(client.state, ClientState.CONNECTED)
+                    await client.disconnect()
+                    self.assertEqual(client.state, ClientState.DISCONNECTED)
+
+
 class TestSubscription(unittest.IsolatedAsyncioTestCase):
     async def test_client_subscribe_unsubscribes(self) -> None:
         for use_protobuf in (False, True):
@@ -99,6 +120,121 @@ class TestSubscription(unittest.IsolatedAsyncioTestCase):
                 await sub.unsubscribe()
                 self.assertTrue(sub.state == SubscriptionState.UNSUBSCRIBED)
                 await client.disconnect()
+
+
+class TestSubscribeUnsubscribeLoop(unittest.IsolatedAsyncioTestCase):
+    async def test_subscribe_unsubscribe_loop(self) -> None:
+        for use_protobuf in (False, True):
+            with self.subTest(use_protobuf=use_protobuf):
+                client = Client(
+                    "ws://localhost:8000/connection/websocket",
+                    use_protobuf=use_protobuf,
+                    get_token=test_get_client_token,
+                )
+                channel = "sub_unsub_loop_channel" + uuid.uuid4().hex
+                sub = client.new_subscription(
+                    channel, get_token=test_get_subscription_token
+                )
+                await client.connect()
+                for _ in range(3):
+                    await sub.subscribe()
+                    await sub.ready()
+                    self.assertEqual(sub.state, SubscriptionState.SUBSCRIBED)
+                    await sub.unsubscribe()
+                    self.assertEqual(sub.state, SubscriptionState.UNSUBSCRIBED)
+                await client.disconnect()
+
+
+class TestMultipleSubscriptions(unittest.IsolatedAsyncioTestCase):
+    async def test_multiple_subscriptions(self) -> None:
+        for use_protobuf in (False, True):
+            with self.subTest(use_protobuf=use_protobuf):
+                client = Client(
+                    "ws://localhost:8000/connection/websocket",
+                    use_protobuf=use_protobuf,
+                    get_token=test_get_client_token,
+                )
+                subs = []
+                for i in range(5):
+                    channel = f"multi_sub_{i}_" + uuid.uuid4().hex
+                    sub = client.new_subscription(
+                        channel, get_token=test_get_subscription_token
+                    )
+                    subs.append(sub)
+
+                await client.connect()
+                for sub in subs:
+                    await sub.subscribe()
+                for sub in subs:
+                    await sub.ready()
+                    self.assertEqual(sub.state, SubscriptionState.SUBSCRIBED)
+
+                self.assertEqual(len(client.subscriptions()), 5)
+
+                for sub in subs:
+                    await sub.unsubscribe()
+                await client.disconnect()
+
+
+class TestSubscriptionManagement(unittest.IsolatedAsyncioTestCase):
+    async def test_get_subscription(self) -> None:
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            get_token=test_get_client_token,
+        )
+        channel = "get_sub_channel" + uuid.uuid4().hex
+        sub = client.new_subscription(channel, get_token=test_get_subscription_token)
+        self.assertIs(client.get_subscription(channel), sub)
+        self.assertIsNone(client.get_subscription("nonexistent"))
+        await client.disconnect()
+
+    async def test_remove_subscription(self) -> None:
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            get_token=test_get_client_token,
+        )
+        channel = "remove_sub_channel" + uuid.uuid4().hex
+        sub = client.new_subscription(channel, get_token=test_get_subscription_token)
+        self.assertIsNotNone(client.get_subscription(channel))
+        client.remove_subscription(sub)
+        self.assertIsNone(client.get_subscription(channel))
+        await client.disconnect()
+
+    async def test_duplicate_subscription_raises(self) -> None:
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            get_token=test_get_client_token,
+        )
+        channel = "dup_sub_channel" + uuid.uuid4().hex
+        client.new_subscription(channel, get_token=test_get_subscription_token)
+        raised = False
+        try:
+            client.new_subscription(channel, get_token=test_get_subscription_token)
+        except DuplicateSubscriptionError:
+            raised = True
+        self.assertTrue(raised)
+        await client.disconnect()
+
+    async def test_remove_subscribed_subscription_raises(self) -> None:
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            get_token=test_get_client_token,
+        )
+        channel = "remove_active_sub_" + uuid.uuid4().hex
+        sub = client.new_subscription(channel, get_token=test_get_subscription_token)
+        await client.connect()
+        await sub.subscribe()
+        await sub.ready()
+        raised = False
+        try:
+            client.remove_subscription(sub)
+        except CentrifugeError:
+            raised = True
+        self.assertTrue(raised)
+        await sub.unsubscribe()
+        client.remove_subscription(sub)
+        self.assertIsNone(client.get_subscription(channel))
+        await client.disconnect()
 
 
 class TestSubscriptionOperations(unittest.IsolatedAsyncioTestCase):
@@ -128,6 +264,99 @@ class TestSubscriptionOperations(unittest.IsolatedAsyncioTestCase):
                 result = await sub.presence_stats()
                 self.assertTrue(result.num_clients == 1)
                 self.assertTrue(result.num_users == 1)
+                await client.disconnect()
+
+
+class TestClientLevelOperations(unittest.IsolatedAsyncioTestCase):
+    async def test_client_publish_history_presence(self) -> None:
+        for use_protobuf in (False, True):
+            with self.subTest(use_protobuf=use_protobuf):
+                client = Client(
+                    "ws://localhost:8000/connection/websocket",
+                    use_protobuf=use_protobuf,
+                    get_token=test_get_client_token,
+                )
+                channel = "client_ops_channel" + uuid.uuid4().hex
+                sub = client.new_subscription(
+                    channel, get_token=test_get_subscription_token
+                )
+                await client.connect()
+                await sub.subscribe()
+                await sub.ready()
+
+                payload = {"input": "client level test"}
+                if use_protobuf:
+                    payload = json.dumps(payload).encode()
+
+                await client.publish(channel, payload)
+
+                result = await client.history(channel, limit=-1)
+                self.assertEqual(len(result.publications), 1)
+                self.assertEqual(result.publications[0].data, payload)
+                self.assertTrue(result.offset > 0)
+                self.assertTrue(result.epoch)
+
+                result = await client.presence(channel)
+                self.assertEqual(len(result.clients), 1)
+
+                result = await client.presence_stats(channel)
+                self.assertEqual(result.num_clients, 1)
+                self.assertEqual(result.num_users, 1)
+
+                await client.disconnect()
+
+
+class TestHistoryPagination(unittest.IsolatedAsyncioTestCase):
+    async def test_history_since_and_reverse(self) -> None:
+        for use_protobuf in (False, True):
+            with self.subTest(use_protobuf=use_protobuf):
+                client = Client(
+                    "ws://localhost:8000/connection/websocket",
+                    use_protobuf=use_protobuf,
+                    get_token=test_get_client_token,
+                )
+                channel = "history_pagination_" + uuid.uuid4().hex
+                sub = client.new_subscription(
+                    channel, get_token=test_get_subscription_token
+                )
+                await client.connect()
+                await sub.subscribe()
+
+                num_messages = 5
+                for i in range(num_messages):
+                    payload = {"msg": i}
+                    if use_protobuf:
+                        payload = json.dumps(payload).encode()
+                    await sub.publish(data=payload)
+
+                # Get all history.
+                result = await sub.history(limit=-1)
+                self.assertEqual(len(result.publications), num_messages)
+
+                # Get history with limit.
+                result = await sub.history(limit=2)
+                self.assertEqual(len(result.publications), 2)
+
+                # Get history with since (pagination).
+                first_page = await sub.history(limit=2)
+                self.assertEqual(len(first_page.publications), 2)
+                since = StreamPosition(
+                    offset=first_page.publications[-1].offset,
+                    epoch=first_page.epoch,
+                )
+                second_page = await sub.history(limit=2, since=since)
+                self.assertEqual(len(second_page.publications), 2)
+                # Ensure pages don't overlap.
+                first_offsets = {p.offset for p in first_page.publications}
+                second_offsets = {p.offset for p in second_page.publications}
+                self.assertTrue(first_offsets.isdisjoint(second_offsets))
+
+                # Get history in reverse order.
+                result = await sub.history(limit=-1, reverse=True)
+                self.assertEqual(len(result.publications), num_messages)
+                offsets = [p.offset for p in result.publications]
+                self.assertEqual(offsets, sorted(offsets, reverse=True))
+
                 await client.disconnect()
 
 
@@ -251,6 +480,65 @@ class TestJoinLeave(unittest.IsolatedAsyncioTestCase):
         await client2.disconnect()
 
 
+class TestPresenceTwoClients(unittest.IsolatedAsyncioTestCase):
+    async def test_presence_two_clients(self) -> None:
+        for use_protobuf in (False, True):
+            with self.subTest(use_protobuf=use_protobuf):
+                await self._test(use_protobuf=use_protobuf)
+
+    async def _test(self, use_protobuf=False) -> None:
+        client1 = Client(
+            "ws://localhost:8000/connection/websocket",
+            use_protobuf=use_protobuf,
+            get_token=test_get_client_token,
+        )
+        client2 = Client(
+            "ws://localhost:8000/connection/websocket",
+            use_protobuf=use_protobuf,
+            get_token=test_get_client_token,
+        )
+
+        client1_id = ""
+
+        async def on_connected(ctx: ConnectedContext) -> None:
+            nonlocal client1_id
+            client1_id = ctx.client
+
+        client1.events.on_connected = on_connected
+
+        channel = "presence_two_" + uuid.uuid4().hex
+        sub1 = client1.new_subscription(
+            channel, get_token=test_get_subscription_token
+        )
+        sub2 = client2.new_subscription(
+            channel, get_token=test_get_subscription_token
+        )
+
+        join_future = asyncio.Future()
+
+        async def on_join(ctx: JoinContext) -> None:
+            if ctx.info.client == client1_id:
+                return
+            if not join_future.done():
+                join_future.set_result(True)
+
+        sub1.events.on_join = on_join
+
+        await client1.connect()
+        await sub1.subscribe()
+        await client2.connect()
+        await sub2.subscribe()
+        await join_future
+
+        result = await sub1.presence()
+        self.assertEqual(len(result.clients), 2)
+        result = await sub1.presence_stats()
+        self.assertEqual(result.num_clients, 2)
+
+        await client1.disconnect()
+        await client2.disconnect()
+
+
 class TestAutoRecovery(unittest.IsolatedAsyncioTestCase):
     async def test_auto_recovery(self) -> None:
         for use_protobuf in (False, True):
@@ -329,6 +617,83 @@ class TestAutoRecovery(unittest.IsolatedAsyncioTestCase):
         await client2.disconnect()
 
 
+class TestRecoveryAfterUnsubscribeResubscribe(unittest.IsolatedAsyncioTestCase):
+    async def test_recovery_after_unsub_resub(self) -> None:
+        for use_protobuf in (False, True):
+            with self.subTest(use_protobuf=use_protobuf):
+                await self._test(use_protobuf=use_protobuf)
+
+    async def _test(self, use_protobuf=False) -> None:
+        client1 = Client(
+            "ws://localhost:8000/connection/websocket",
+            use_protobuf=use_protobuf,
+            get_token=test_get_client_token,
+        )
+        client2 = Client(
+            "ws://localhost:8000/connection/websocket",
+            use_protobuf=use_protobuf,
+            get_token=test_get_client_token,
+        )
+
+        channel = "recovery_unsub_" + uuid.uuid4().hex
+        sub1 = client1.new_subscription(
+            channel, get_token=test_get_subscription_token
+        )
+        sub2 = client2.new_subscription(
+            channel, get_token=test_get_subscription_token
+        )
+
+        publications_received: List = []
+
+        async def on_publication(ctx: PublicationContext) -> None:
+            publications_received.append(ctx.pub.data)
+
+        sub1.events.on_publication = on_publication
+
+        await client1.connect()
+        await sub1.subscribe()
+        await sub1.ready()
+        await client2.connect()
+        await sub2.subscribe()
+
+        # Publish first message.
+        payload1 = {"msg": "before_unsub"}
+        if use_protobuf:
+            payload1 = json.dumps(payload1).encode()
+        await sub2.publish(data=payload1)
+        await asyncio.sleep(0.2)
+
+        # Unsubscribe sub1, publish more messages, then resubscribe.
+        await sub1.unsubscribe()
+        payload2 = {"msg": "during_unsub"}
+        if use_protobuf:
+            payload2 = json.dumps(payload2).encode()
+        await sub2.publish(data=payload2)
+
+        recovered_future = asyncio.Future()
+
+        async def on_subscribed(ctx: SubscribedContext) -> None:
+            recovered_future.set_result(ctx.recovered)
+
+        sub1.events.on_subscribed = on_subscribed
+
+        await sub1.subscribe()
+        recovered = await recovered_future
+        self.assertTrue(recovered)
+        # Wait a bit for recovered publications to be delivered.
+        await asyncio.sleep(0.3)
+        # Should have received the message published during unsubscribe.
+        found = False
+        for pub_data in publications_received:
+            if pub_data == payload2:
+                found = True
+                break
+        self.assertTrue(found, "Did not receive publication sent during unsubscribe")
+
+        await client1.disconnect()
+        await client2.disconnect()
+
+
 class TestClientTokenInvalid(unittest.IsolatedAsyncioTestCase):
     async def test_client_token(self) -> None:
         for use_protobuf in (False, True):
@@ -356,6 +721,37 @@ class TestClientTokenInvalid(unittest.IsolatedAsyncioTestCase):
         res = await future
         self.assertTrue(res == 3500)
         self.assertTrue(client.state == ClientState.DISCONNECTED)
+        await client.disconnect()
+
+
+class TestClientTokenUnauthorized(unittest.IsolatedAsyncioTestCase):
+    async def test_unauthorized_token(self) -> None:
+        for use_protobuf in (False, True):
+            with self.subTest(use_protobuf=use_protobuf):
+                await self._test(use_protobuf=use_protobuf)
+
+    async def _test(self, use_protobuf=False) -> None:
+        future = asyncio.Future()
+
+        async def unauthorized_get_token() -> str:
+            raise UnauthorizedError
+
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            use_protobuf=use_protobuf,
+            get_token=unauthorized_get_token,
+        )
+
+        async def on_disconnected(ctx: DisconnectedContext) -> None:
+            if not future.done():
+                future.set_result(ctx.code)
+
+        client.events.on_disconnected = on_disconnected
+
+        await client.connect()
+        res = await future
+        self.assertEqual(res, 1)
+        self.assertEqual(client.state, ClientState.DISCONNECTED)
         await client.disconnect()
 
 
@@ -393,6 +789,44 @@ class TestSubscriptionTokenInvalid(unittest.IsolatedAsyncioTestCase):
         await client.disconnect()
 
 
+class TestSubscriptionTokenUnauthorized(unittest.IsolatedAsyncioTestCase):
+    async def test_unauthorized_subscription_token(self) -> None:
+        for use_protobuf in (False, True):
+            with self.subTest(use_protobuf=use_protobuf):
+                await self._test(use_protobuf=use_protobuf)
+
+    async def _test(self, use_protobuf=False) -> None:
+        future = asyncio.Future()
+
+        async def unauthorized_get_token(_channel: str) -> str:
+            raise UnauthorizedError
+
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            use_protobuf=use_protobuf,
+            get_token=test_get_client_token,
+        )
+
+        sub = client.new_subscription(
+            "channel_unauth_" + uuid.uuid4().hex,
+            get_token=unauthorized_get_token,
+        )
+
+        async def on_unsubscribed(ctx: UnsubscribedContext) -> None:
+            if not future.done():
+                future.set_result(ctx.code)
+
+        sub.events.on_unsubscribed = on_unsubscribed
+
+        await client.connect()
+        await sub.subscribe()
+        res = await future
+        self.assertEqual(res, 1)
+        self.assertEqual(sub.state, SubscriptionState.UNSUBSCRIBED)
+        self.assertEqual(client.state, ClientState.CONNECTED)
+        await client.disconnect()
+
+
 class TestServerSideSubscriptions(unittest.IsolatedAsyncioTestCase):
     async def test_server_side_subs(self) -> None:
         for use_protobuf in (False, True):
@@ -406,7 +840,6 @@ class TestServerSideSubscriptions(unittest.IsolatedAsyncioTestCase):
             get_token=test_get_client_token,
         )
 
-        # First subscribe both clients to the same channel.
         channel = "#42"
 
         payload = {"input": "test"}
@@ -438,6 +871,115 @@ class TestServerSideSubscriptions(unittest.IsolatedAsyncioTestCase):
         await join_future
         await client.publish(channel, payload)
         await publication_future
+        await client.disconnect()
+
+
+class TestConnectedContext(unittest.IsolatedAsyncioTestCase):
+    async def test_connected_context_has_client_and_version(self) -> None:
+        for use_protobuf in (False, True):
+            with self.subTest(use_protobuf=use_protobuf):
+                await self._test(use_protobuf=use_protobuf)
+
+    async def _test(self, use_protobuf=False) -> None:
+        connected_future = asyncio.Future()
+
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            use_protobuf=use_protobuf,
+            get_token=test_get_client_token,
+        )
+
+        async def on_connected(ctx: ConnectedContext) -> None:
+            connected_future.set_result(ctx)
+
+        client.events.on_connected = on_connected
+        await client.connect()
+        ctx = await connected_future
+        self.assertTrue(ctx.client)
+        self.assertTrue(ctx.version)
+        await client.disconnect()
+
+
+class TestConnectingDisconnectedCallbacks(unittest.IsolatedAsyncioTestCase):
+    async def test_connecting_and_disconnected_callbacks(self) -> None:
+        for use_protobuf in (False, True):
+            with self.subTest(use_protobuf=use_protobuf):
+                await self._test(use_protobuf=use_protobuf)
+
+    async def _test(self, use_protobuf=False) -> None:
+        connecting_future = asyncio.Future()
+        disconnected_future = asyncio.Future()
+
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            use_protobuf=use_protobuf,
+            get_token=test_get_client_token,
+        )
+
+        async def on_connecting(ctx: ConnectingContext) -> None:
+            if not connecting_future.done():
+                connecting_future.set_result(ctx)
+
+        async def on_disconnected(ctx: DisconnectedContext) -> None:
+            if not disconnected_future.done():
+                disconnected_future.set_result(ctx)
+
+        client.events.on_connecting = on_connecting
+        client.events.on_disconnected = on_disconnected
+
+        await client.connect()
+        ctx = await connecting_future
+        self.assertIsInstance(ctx.code, int)
+        self.assertTrue(ctx.reason)
+
+        await client.ready()
+        await client.disconnect()
+        ctx = await disconnected_future
+        self.assertIsInstance(ctx.code, int)
+        self.assertTrue(ctx.reason)
+
+
+class TestSubscribingSubscribedCallbacks(unittest.IsolatedAsyncioTestCase):
+    async def test_subscribing_and_subscribed_callbacks(self) -> None:
+        for use_protobuf in (False, True):
+            with self.subTest(use_protobuf=use_protobuf):
+                await self._test(use_protobuf=use_protobuf)
+
+    async def _test(self, use_protobuf=False) -> None:
+        subscribing_future = asyncio.Future()
+        subscribed_future = asyncio.Future()
+
+        client = Client(
+            "ws://localhost:8000/connection/websocket",
+            use_protobuf=use_protobuf,
+            get_token=test_get_client_token,
+        )
+        channel = "callbacks_" + uuid.uuid4().hex
+        sub = client.new_subscription(
+            channel, get_token=test_get_subscription_token
+        )
+
+        async def on_subscribing(ctx: SubscribingContext) -> None:
+            if not subscribing_future.done():
+                subscribing_future.set_result(ctx)
+
+        async def on_subscribed(ctx: SubscribedContext) -> None:
+            if not subscribed_future.done():
+                subscribed_future.set_result(ctx)
+
+        sub.events.on_subscribing = on_subscribing
+        sub.events.on_subscribed = on_subscribed
+
+        await client.connect()
+        await sub.subscribe()
+
+        ctx = await subscribing_future
+        self.assertIsInstance(ctx.code, int)
+        self.assertTrue(ctx.reason)
+
+        ctx = await subscribed_future
+        self.assertEqual(ctx.channel, channel)
+
         await client.disconnect()
 
 

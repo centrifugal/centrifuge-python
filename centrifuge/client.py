@@ -1552,6 +1552,8 @@ class Subscription:
             return
 
         self.state = SubscriptionState.SUBSCRIBING
+        if self._subscribed_future.done():
+            self._subscribed_future = asyncio.Future()
 
         handler = self.events.on_subscribing
         code = _SubscribingCode.SUBSCRIBE_CALLED
