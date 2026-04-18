@@ -132,9 +132,7 @@ class TestSubscribeUnsubscribeLoop(unittest.IsolatedAsyncioTestCase):
                     get_token=test_get_client_token,
                 )
                 channel = "sub_unsub_loop_channel" + uuid.uuid4().hex
-                sub = client.new_subscription(
-                    channel, get_token=test_get_subscription_token
-                )
+                sub = client.new_subscription(channel, get_token=test_get_subscription_token)
                 await client.connect()
                 for _ in range(3):
                     await sub.subscribe()
@@ -157,9 +155,7 @@ class TestMultipleSubscriptions(unittest.IsolatedAsyncioTestCase):
                 subs = []
                 for i in range(5):
                     channel = f"multi_sub_{i}_" + uuid.uuid4().hex
-                    sub = client.new_subscription(
-                        channel, get_token=test_get_subscription_token
-                    )
+                    sub = client.new_subscription(channel, get_token=test_get_subscription_token)
                     subs.append(sub)
 
                 await client.connect()
@@ -277,9 +273,7 @@ class TestClientLevelOperations(unittest.IsolatedAsyncioTestCase):
                     get_token=test_get_client_token,
                 )
                 channel = "client_ops_channel" + uuid.uuid4().hex
-                sub = client.new_subscription(
-                    channel, get_token=test_get_subscription_token
-                )
+                sub = client.new_subscription(channel, get_token=test_get_subscription_token)
                 await client.connect()
                 await sub.subscribe()
                 await sub.ready()
@@ -316,9 +310,7 @@ class TestHistoryPagination(unittest.IsolatedAsyncioTestCase):
                     get_token=test_get_client_token,
                 )
                 channel = "history_pagination_" + uuid.uuid4().hex
-                sub = client.new_subscription(
-                    channel, get_token=test_get_subscription_token
-                )
+                sub = client.new_subscription(channel, get_token=test_get_subscription_token)
                 await client.connect()
                 await sub.subscribe()
 
@@ -507,12 +499,8 @@ class TestPresenceTwoClients(unittest.IsolatedAsyncioTestCase):
         client1.events.on_connected = on_connected
 
         channel = "presence_two_" + uuid.uuid4().hex
-        sub1 = client1.new_subscription(
-            channel, get_token=test_get_subscription_token
-        )
-        sub2 = client2.new_subscription(
-            channel, get_token=test_get_subscription_token
-        )
+        sub1 = client1.new_subscription(channel, get_token=test_get_subscription_token)
+        sub2 = client2.new_subscription(channel, get_token=test_get_subscription_token)
 
         join_future = asyncio.Future()
 
@@ -636,12 +624,8 @@ class TestRecoveryAfterUnsubscribeResubscribe(unittest.IsolatedAsyncioTestCase):
         )
 
         channel = "recovery_unsub_" + uuid.uuid4().hex
-        sub1 = client1.new_subscription(
-            channel, get_token=test_get_subscription_token
-        )
-        sub2 = client2.new_subscription(
-            channel, get_token=test_get_subscription_token
-        )
+        sub1 = client1.new_subscription(channel, get_token=test_get_subscription_token)
+        sub2 = client2.new_subscription(channel, get_token=test_get_subscription_token)
 
         publications_received: List = []
 
@@ -955,9 +939,7 @@ class TestSubscribingSubscribedCallbacks(unittest.IsolatedAsyncioTestCase):
             get_token=test_get_client_token,
         )
         channel = "callbacks_" + uuid.uuid4().hex
-        sub = client.new_subscription(
-            channel, get_token=test_get_subscription_token
-        )
+        sub = client.new_subscription(channel, get_token=test_get_subscription_token)
 
         async def on_subscribing(ctx: SubscribingContext) -> None:
             if not subscribing_future.done():
@@ -1329,7 +1311,7 @@ class TestConnectionLeak(unittest.IsolatedAsyncioTestCase):
             client._loop.call_later = original_call_later
 
 
-class TestProcessDisconnectReconnectFlag(unittest.IsolatedAsyncioTestCase):
+class TestProcessDisconnectReconnectFlag(unittest.IsolatedAsyncioTestCase):  # noqa: PLR0904
     """Unit tests for the reconnect flag logic in Client._process_disconnect.
 
     Centrifugo protocol reconnect rules:
@@ -1341,7 +1323,8 @@ class TestProcessDisconnectReconnectFlag(unittest.IsolatedAsyncioTestCase):
     - Codes >= 5000    -> reconnect
     """
 
-    def _make_client(self):
+    @classmethod
+    def _make_client(cls):
         return Client(
             "ws://localhost:8000/connection/websocket",
             get_token=test_get_client_token,
@@ -1355,7 +1338,7 @@ class TestProcessDisconnectReconnectFlag(unittest.IsolatedAsyncioTestCase):
         client = self._make_client()
         captured = {}
 
-        async def fake_disconnect(c, reason, reconnect):
+        async def fake_disconnect(c, reason, reconnect):  # noqa: ARG001
             captured["code"] = c
             captured["reconnect"] = reconnect
 
@@ -1375,7 +1358,9 @@ class TestProcessDisconnectReconnectFlag(unittest.IsolatedAsyncioTestCase):
 
     async def test_code_3750_does_not_reconnect(self):
         reconnect = await self._call_process_disconnect(3750)
-        self.assertFalse(reconnect, "code 3750 (mid no-reconnect range) should NOT trigger reconnect")
+        self.assertFalse(
+            reconnect, "code 3750 (mid no-reconnect range) should NOT trigger reconnect"
+        )
 
     # --- No-reconnect codes (4500-4999) ---
 
@@ -1389,7 +1374,9 @@ class TestProcessDisconnectReconnectFlag(unittest.IsolatedAsyncioTestCase):
 
     async def test_code_4750_does_not_reconnect(self):
         reconnect = await self._call_process_disconnect(4750)
-        self.assertFalse(reconnect, "code 4750 (mid no-reconnect range) should NOT trigger reconnect")
+        self.assertFalse(
+            reconnect, "code 4750 (mid no-reconnect range) should NOT trigger reconnect"
+        )
 
     # --- Reconnect codes (3000-3499) ---
 
@@ -1467,7 +1454,9 @@ class TestProcessDisconnectReconnectFlag(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(reconnect_4500, "code 4500 should NOT trigger reconnect")
 
     async def test_boundary_4999_does_not_5000_reconnects(self):
-        """4999 is the last no-reconnect code; 5000 is the first reconnect code above that range."""
+        """
+        4999 is the last no-reconnect code; 5000 is the first reconnect code above that range.
+        """
         reconnect_4999 = await self._call_process_disconnect(4999)
         reconnect_5000 = await self._call_process_disconnect(5000)
         self.assertFalse(reconnect_4999, "code 4999 should NOT trigger reconnect")
