@@ -1327,3 +1327,148 @@ class TestConnectionLeak(unittest.IsolatedAsyncioTestCase):
             await client.disconnect()
         finally:
             client._loop.call_later = original_call_later
+
+
+class TestProcessDisconnectReconnectFlag(unittest.IsolatedAsyncioTestCase):
+    """Unit tests for the reconnect flag logic in Client._process_disconnect.
+
+    Centrifugo protocol reconnect rules:
+    - Codes 3000-3499  -> reconnect
+    - Codes 3500-3999  -> do NOT reconnect
+    - Codes 4000-4499  -> reconnect
+    - Codes 4500-4999  -> do NOT reconnect
+    - Codes < 3000     -> reconnect
+    - Codes >= 5000    -> reconnect
+    """
+
+    def _make_client(self):
+        return Client(
+            "ws://localhost:8000/connection/websocket",
+            get_token=test_get_client_token,
+        )
+
+    async def _call_process_disconnect(self, code: int):
+        """Call _process_disconnect with a given code, intercepting the _disconnect call.
+
+        Returns the reconnect flag value that was passed to _disconnect.
+        """
+        client = self._make_client()
+        captured = {}
+
+        async def fake_disconnect(c, reason, reconnect):
+            captured["code"] = c
+            captured["reconnect"] = reconnect
+
+        client._disconnect = fake_disconnect
+        await client._process_disconnect({"code": code, "reason": "test"})
+        return captured["reconnect"]
+
+    # --- No-reconnect codes (3500-3999) ---
+
+    async def test_code_3500_does_not_reconnect(self):
+        reconnect = await self._call_process_disconnect(3500)
+        self.assertFalse(reconnect, "code 3500 should NOT trigger reconnect")
+
+    async def test_code_3999_does_not_reconnect(self):
+        reconnect = await self._call_process_disconnect(3999)
+        self.assertFalse(reconnect, "code 3999 should NOT trigger reconnect")
+
+    async def test_code_3750_does_not_reconnect(self):
+        reconnect = await self._call_process_disconnect(3750)
+        self.assertFalse(reconnect, "code 3750 (mid no-reconnect range) should NOT trigger reconnect")
+
+    # --- No-reconnect codes (4500-4999) ---
+
+    async def test_code_4500_does_not_reconnect(self):
+        reconnect = await self._call_process_disconnect(4500)
+        self.assertFalse(reconnect, "code 4500 should NOT trigger reconnect")
+
+    async def test_code_4999_does_not_reconnect(self):
+        reconnect = await self._call_process_disconnect(4999)
+        self.assertFalse(reconnect, "code 4999 should NOT trigger reconnect")
+
+    async def test_code_4750_does_not_reconnect(self):
+        reconnect = await self._call_process_disconnect(4750)
+        self.assertFalse(reconnect, "code 4750 (mid no-reconnect range) should NOT trigger reconnect")
+
+    # --- Reconnect codes (3000-3499) ---
+
+    async def test_code_3000_reconnects(self):
+        reconnect = await self._call_process_disconnect(3000)
+        self.assertTrue(reconnect, "code 3000 should trigger reconnect")
+
+    async def test_code_3499_reconnects(self):
+        reconnect = await self._call_process_disconnect(3499)
+        self.assertTrue(reconnect, "code 3499 should trigger reconnect")
+
+    async def test_code_3250_reconnects(self):
+        reconnect = await self._call_process_disconnect(3250)
+        self.assertTrue(reconnect, "code 3250 (mid reconnect range) should trigger reconnect")
+
+    # --- Reconnect codes (4000-4499) ---
+
+    async def test_code_4000_reconnects(self):
+        reconnect = await self._call_process_disconnect(4000)
+        self.assertTrue(reconnect, "code 4000 should trigger reconnect")
+
+    async def test_code_4499_reconnects(self):
+        reconnect = await self._call_process_disconnect(4499)
+        self.assertTrue(reconnect, "code 4499 should trigger reconnect")
+
+    async def test_code_4250_reconnects(self):
+        reconnect = await self._call_process_disconnect(4250)
+        self.assertTrue(reconnect, "code 4250 (mid reconnect range) should trigger reconnect")
+
+    # --- Reconnect codes >= 5000 ---
+
+    async def test_code_5000_reconnects(self):
+        reconnect = await self._call_process_disconnect(5000)
+        self.assertTrue(reconnect, "code 5000 should trigger reconnect")
+
+    async def test_code_9999_reconnects(self):
+        reconnect = await self._call_process_disconnect(9999)
+        self.assertTrue(reconnect, "code 9999 (well above 5000) should trigger reconnect")
+
+    # --- Reconnect codes < 3000 ---
+
+    async def test_code_1000_reconnects(self):
+        reconnect = await self._call_process_disconnect(1000)
+        self.assertTrue(reconnect, "code 1000 (< 3000) should trigger reconnect")
+
+    async def test_code_0_reconnects(self):
+        reconnect = await self._call_process_disconnect(0)
+        self.assertTrue(reconnect, "code 0 (< 3000) should trigger reconnect")
+
+    async def test_code_2999_reconnects(self):
+        reconnect = await self._call_process_disconnect(2999)
+        self.assertTrue(reconnect, "code 2999 (just below 3000 boundary) should trigger reconnect")
+
+    # --- Boundary values ---
+
+    async def test_boundary_3499_reconnects_3500_does_not(self):
+        """3499 is the last reconnect code; 3500 is the first no-reconnect code."""
+        reconnect_3499 = await self._call_process_disconnect(3499)
+        reconnect_3500 = await self._call_process_disconnect(3500)
+        self.assertTrue(reconnect_3499, "code 3499 should trigger reconnect")
+        self.assertFalse(reconnect_3500, "code 3500 should NOT trigger reconnect")
+
+    async def test_boundary_3999_does_not_4000_reconnects(self):
+        """3999 is the last no-reconnect code; 4000 is the first reconnect code in that gap."""
+        reconnect_3999 = await self._call_process_disconnect(3999)
+        reconnect_4000 = await self._call_process_disconnect(4000)
+        self.assertFalse(reconnect_3999, "code 3999 should NOT trigger reconnect")
+        self.assertTrue(reconnect_4000, "code 4000 should trigger reconnect")
+
+    async def test_boundary_4499_reconnects_4500_does_not(self):
+        """4499 is the last reconnect code; 4500 is the first no-reconnect code in that range."""
+        reconnect_4499 = await self._call_process_disconnect(4499)
+        reconnect_4500 = await self._call_process_disconnect(4500)
+        self.assertTrue(reconnect_4499, "code 4499 should trigger reconnect")
+        self.assertFalse(reconnect_4500, "code 4500 should NOT trigger reconnect")
+
+    async def test_boundary_4999_does_not_5000_reconnects(self):
+        """4999 is the last no-reconnect code; 5000 is the first reconnect code above that range."""
+        reconnect_4999 = await self._call_process_disconnect(4999)
+        reconnect_5000 = await self._call_process_disconnect(5000)
+        self.assertFalse(reconnect_4999, "code 4999 should NOT trigger reconnect")
+        self.assertTrue(reconnect_5000, "code 5000 should trigger reconnect")
