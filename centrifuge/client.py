@@ -1287,7 +1287,7 @@ class Client:
     async def _process_disconnect(self, disconnect: Dict[str, Any]) -> None:
         logger.debug("disconnect push received")
         code = disconnect["code"]
-        reconnect = (3500 <= code < 4000) or (4500 <= code < 5000)
+        reconnect = not ((3500 <= code < 4000) or (4500 <= code < 5000))
         await self._disconnect(code, disconnect["reason"], reconnect)
 
     async def _process_reply(self, reply: Dict[str, Any]) -> None:
