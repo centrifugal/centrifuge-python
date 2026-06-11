@@ -51,6 +51,15 @@ dev = [
     "ruff~=0.1.4",
     "pre-commit~=3.5.0",
 ]
+# Tooling for `make proto`, kept out of dev: grpcio-tools 1.62.x requires
+# protobuf<5 and would downgrade the protobuf runtime when installed — dev
+# environments and the CI protobuf version matrix must not be affected by it.
+# The 1.62.x pin matters: its bundled protoc emits gencode loadable by the
+# oldest protobuf runtime allowed by this project's dependency range (see
+# https://github.com/centrifugal/centrifuge-python/issues/29).
+proto = [
+    "grpcio-tools~=1.62.3",
+]
 
 [tool.hatch.envs.default]
 features = ["dev"]

@@ -23,6 +23,8 @@ from websockets.protocol import State
 
 from centrifuge.codecs import _JsonCodec, _ProtobufCodec
 from centrifuge.codes import (
+    _ERROR_CODE_UNRECOVERABLE_POSITION,
+    _SUBSCRIPTION_FLAG_REJECT_UNRECOVERED,
     _ConnectingCode,
     _DisconnectedCode,
     _ErrorCode,
@@ -213,9 +215,41 @@ class Client:
         recoverable: bool = False,
         join_leave: bool = False,
         delta: Optional[DeltaType] = None,
+        get_state: Optional[Callable[[str], Awaitable[StreamPosition]]] = None,
     ) -> "Subscription":
         """Creates new subscription to channel. If subscription already exists then
         DuplicateSubscriptionError exception will be raised.
+
+        get_state is called to load the app's current state and stream position.
+        Requires Centrifugo >= 6.8.0.
+
+        The SDK calls it:
+
+        - On initial subscribe (no saved position)
+        - On reconnect when recovery fails (server returns error 112 —
+          unrecoverable position)
+
+        NOT called on reconnects where the server successfully recovers missed
+        publications — in that case the recovered publications arrive as events
+        and get_state is skipped.
+
+        The app should load its data from its own source of truth (database,
+        API), render it, and return the stream position. The SDK subscribes with
+        recovery from the returned position, so any publications between the
+        state read and the subscribe are delivered as publication events.
+
+        IMPORTANT: inside get_state, read the stream position FIRST, then read
+        your data. This ensures the position is a lower bound — any data loaded
+        after the position read is guaranteed to be included. The reverse order
+        can produce gaps.
+
+        Recovered publications may overlap with data already loaded in get_state.
+        This works correctly when updates are idempotent (applying the same
+        update twice produces the same result). For non-idempotent updates,
+        deduplicate by publication offset.
+
+        On error, the SDK emits an error event with SUBSCRIPTION_GET_STATE code
+        and retries with backoff.
         """
         if self.get_subscription(channel):
             raise DuplicateSubscriptionError(
@@ -234,6 +268,7 @@ class Client:
             recoverable=recoverable,
             join_leave=join_leave,
             delta=delta,
+            get_state=get_state,
         )
         self._subs[channel] = sub
         return sub
@@ -745,6 +780,16 @@ class Client:
 
         logger.debug("subscribe to channel %s", channel)
 
+        # get_state: ask the app for its current state position. Only called when
+        # we don't have a saved position (first subscribe or after a position reset
+        # due to unrecoverable position error 112). On normal reconnects with a
+        # valid saved position we skip get_state and let the server try recovery —
+        # get_state is only called again if recovery fails.
+        if sub._get_state and not sub._need_recover():
+            proceed = await self._load_state_position(sub, channel)
+            if not proceed:
+                return None
+
         if not sub._token and sub._get_token:
             try:
                 token = await sub._get_token(channel)
@@ -809,6 +854,16 @@ class Client:
             if reply.get("error"):
                 logger.debug("subscribe reply has error: %s", reply.get("error"))
                 code, message, temporary = self._extract_error_details(reply)
+                if code == _ERROR_CODE_UNRECOVERABLE_POSITION and sub._get_state:
+                    # Unrecoverable position with get_state: reset position so the
+                    # next subscribe attempt calls get_state to reload app state
+                    # from scratch. No error event emitted — matches other SDKs.
+                    sub._recover = False
+                    sub._offset = 0
+                    sub._epoch = ""
+                    sub._prev_data = None
+                    await sub._schedule_resubscribe()
+                    return False
                 if _is_token_expired(code):
                     temporary = True
                     sub._token = ""
@@ -825,6 +880,46 @@ class Client:
                     await sub._move_unsubscribed(code, message)
             else:
                 await sub._move_subscribed(reply["subscribe"])
+
+    async def _load_state_position(self, sub: "Subscription", channel: str) -> bool:
+        """Run sub._get_state and store the returned position on the subscription.
+
+        Returns True when the subscribe flow may proceed, False when it must stop
+        (get_state failed and a retry was scheduled, or subscription/client state
+        changed during the await).
+        """
+        try:
+            position = await sub._get_state(channel)
+        except Exception as e:
+            if sub.state != SubscriptionState.SUBSCRIBING:
+                return False
+            handler = sub.events.on_error
+            await handler(
+                SubscriptionErrorContext(
+                    code=_code_number(_ErrorCode.SUBSCRIPTION_GET_STATE),
+                    error=e,
+                ),
+            )
+            asyncio.ensure_future(sub._schedule_resubscribe())
+            return False
+
+        # Re-check subscription state after async get_state()
+        if sub.state != SubscriptionState.SUBSCRIBING:
+            logger.debug("subscription state changed during get_state for %s", channel)
+            return False
+
+        sub._recover = True
+        sub._offset = position.offset
+        sub._epoch = position.epoch
+
+        # Re-check client state after async get_state(). The loaded position is
+        # kept (matches other SDKs): the resubscribe on reconnect recovers from
+        # it instead of calling get_state again.
+        if self.state != ClientState.CONNECTED:
+            logger.debug("client disconnected during get_state for %s", channel)
+            return False
+
+        return True
 
     def _construct_subscribe_command(self, sub: "Subscription", cmd_id: int) -> Dict[str, Any]:
         subscribe = {
@@ -850,6 +945,12 @@ class Client:
             subscribe["recover"] = True
             subscribe["epoch"] = sub._epoch
             subscribe["offset"] = sub._offset
+
+        if sub._get_state:
+            # Ask the server to reject the subscribe with error 112 when recovery
+            # from the provided position is impossible, instead of returning
+            # recovered=false — so we can call get_state again to reload state.
+            subscribe["flag"] = _SUBSCRIPTION_FLAG_REJECT_UNRECOVERED
 
         if sub._delta:
             subscribe["delta"] = sub._delta.value
@@ -1464,6 +1565,7 @@ class Subscription:
         recoverable: bool = False,
         join_leave: bool = False,
         delta: Optional[DeltaType] = None,
+        get_state: Optional[Callable[[str], Awaitable[StreamPosition]]] = None,
     ) -> None:
         """Initializes Subscription instance.
         Note: use Client.new_subscription method to create new subscriptions in your app.
@@ -1476,6 +1578,7 @@ class Subscription:
         self._client: Optional[Client] = client
         self._token = token
         self._get_token = get_token
+        self._get_state = get_state
         self._data = data
         self._min_resubscribe_delay = min_resubscribe_delay
         self._max_resubscribe_delay = max_resubscribe_delay

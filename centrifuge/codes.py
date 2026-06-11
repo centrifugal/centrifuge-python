@@ -62,6 +62,15 @@ class _ErrorCode(Enum):
     BAD_CONFIGURATION = 12
     CONNECT_ERROR = 13
     SUBSCRIBE_ERROR = 14
+    SUBSCRIPTION_GET_STATE = 15
 
     # Errors with code > 100 are errors from server.
     TOKEN_EXPIRED = 109
+
+
+# Subscription feature flags — bitmask sent in SubscribeRequest flag field.
+_SUBSCRIPTION_FLAG_REJECT_UNRECOVERED = 2
+
+# Server error code returned when recovery from the provided position is
+# impossible (only sent when _SUBSCRIPTION_FLAG_REJECT_UNRECOVERED was requested).
+_ERROR_CODE_UNRECOVERABLE_POSITION = 112
