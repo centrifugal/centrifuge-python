@@ -1461,3 +1461,297 @@ class TestProcessDisconnectReconnectFlag(unittest.IsolatedAsyncioTestCase):  # n
         reconnect_5000 = await self._call_process_disconnect(5000)
         self.assertFalse(reconnect_4999, "code 4999 should NOT trigger reconnect")
         self.assertTrue(reconnect_5000, "code 5000 should trigger reconnect")
+
+
+class TestGetState(unittest.IsolatedAsyncioTestCase):
+    """Tests for the get_state callback (stream state loading with recovery).
+
+    These mirror the getState tests in centrifuge-js / -dart / -go / -java and
+    require the docker-compose Centrifugo (>= 6.8.0) running on localhost:8000.
+    """
+
+    @staticmethod
+    def _new_client(use_protobuf=False) -> Client:
+        return Client(
+            "ws://localhost:8000/connection/websocket",
+            use_protobuf=use_protobuf,
+            get_token=test_get_client_token,
+        )
+
+    @staticmethod
+    def _payload(i, use_protobuf=False):
+        payload = {"i": i}
+        if use_protobuf:
+            payload = json.dumps(payload).encode()
+        return payload
+
+    async def test_get_state_called_on_initial_subscribe(self) -> None:
+        for use_protobuf in (False, True):
+            with self.subTest(use_protobuf=use_protobuf):
+                await self._test_get_state_called_on_initial_subscribe(use_protobuf)
+
+    async def _test_get_state_called_on_initial_subscribe(self, use_protobuf) -> None:
+        channel = "get_state_channel" + uuid.uuid4().hex
+
+        # Publish 3 messages BEFORE subscribing (publisher must be subscribed
+        # to be allowed to publish).
+        publisher = self._new_client(use_protobuf=use_protobuf)
+        publisher_sub = publisher.new_subscription(
+            channel, get_token=test_get_subscription_token
+        )
+        await publisher.connect()
+        await publisher_sub.subscribe()
+        for i in range(1, 4):
+            await publisher_sub.publish(data=self._payload(i, use_protobuf))
+
+        client = self._new_client(use_protobuf=use_protobuf)
+
+        get_state_calls = 0
+
+        async def get_state(_channel: str) -> StreamPosition:
+            nonlocal get_state_calls
+            get_state_calls += 1
+            # Zero position — recovery delivers all 3 publications.
+            return StreamPosition(offset=0, epoch="")
+
+        subscribed_future = asyncio.Future()
+        pubs_queue = asyncio.Queue()
+
+        async def on_subscribed(ctx: SubscribedContext) -> None:
+            if not subscribed_future.done():
+                subscribed_future.set_result(ctx)
+
+        async def on_publication(ctx: PublicationContext) -> None:
+            await pubs_queue.put(ctx.pub.data)
+
+        sub = client.new_subscription(
+            channel,
+            get_token=test_get_subscription_token,
+            get_state=get_state,
+        )
+        sub.events.on_subscribed = on_subscribed
+        sub.events.on_publication = on_publication
+
+        await client.connect()
+        await sub.subscribe()
+        await asyncio.wait_for(subscribed_future, timeout=5)
+
+        for i in range(1, 4):
+            data = await asyncio.wait_for(pubs_queue.get(), timeout=5)
+            self.assertEqual(data, self._payload(i, use_protobuf))
+        self.assertEqual(get_state_calls, 1)
+
+        await client.disconnect()
+        await publisher.disconnect()
+
+    async def test_get_state_not_called_when_recovery_succeeds(self) -> None:
+        channel = "get_state_channel" + uuid.uuid4().hex
+
+        publisher = self._new_client()
+        publisher_sub = publisher.new_subscription(
+            channel, get_token=test_get_subscription_token
+        )
+        await publisher.connect()
+        await publisher_sub.subscribe()
+
+        client = self._new_client()
+
+        get_state_calls = 0
+
+        async def get_state(_channel: str) -> StreamPosition:
+            nonlocal get_state_calls
+            get_state_calls += 1
+            return StreamPosition(offset=0, epoch="")
+
+        subscribed_queue = asyncio.Queue()
+        pubs_queue = asyncio.Queue()
+
+        async def on_subscribed(ctx: SubscribedContext) -> None:
+            await subscribed_queue.put(ctx)
+
+        async def on_publication(ctx: PublicationContext) -> None:
+            await pubs_queue.put(ctx.pub.data)
+
+        sub = client.new_subscription(
+            channel,
+            get_token=test_get_subscription_token,
+            get_state=get_state,
+        )
+        sub.events.on_subscribed = on_subscribed
+        sub.events.on_publication = on_publication
+
+        await client.connect()
+        await sub.subscribe()
+        await asyncio.wait_for(subscribed_queue.get(), timeout=5)
+        self.assertEqual(get_state_calls, 1)
+
+        # Disconnect, publish while away, reconnect — SDK has a saved position
+        # and recovery succeeds, so get_state must NOT be called again.
+        await client.disconnect()
+        await publisher_sub.publish(data=self._payload(1))
+        await publisher_sub.publish(data=self._payload(2))
+        await client.connect()
+
+        resub_ctx = await asyncio.wait_for(subscribed_queue.get(), timeout=5)
+        self.assertTrue(resub_ctx.recovered)
+        for i in range(1, 3):
+            data = await asyncio.wait_for(pubs_queue.get(), timeout=5)
+            self.assertEqual(data, self._payload(i))
+        self.assertEqual(get_state_calls, 1)
+
+        await client.disconnect()
+        await publisher.disconnect()
+
+    async def test_get_state_error_retried(self) -> None:
+        channel = "get_state_channel" + uuid.uuid4().hex
+        client = self._new_client()
+
+        get_state_calls = 0
+
+        async def get_state(_channel: str) -> StreamPosition:
+            nonlocal get_state_calls
+            get_state_calls += 1
+            if get_state_calls == 1:
+                raise Exception("simulated DB failure")
+            return StreamPosition(offset=0, epoch="")
+
+        subscribed_future = asyncio.Future()
+        errors_queue = asyncio.Queue()
+
+        async def on_subscribed(ctx: SubscribedContext) -> None:
+            if not subscribed_future.done():
+                subscribed_future.set_result(ctx)
+
+        async def on_error(ctx) -> None:
+            await errors_queue.put(ctx)
+
+        sub = client.new_subscription(
+            channel,
+            get_token=test_get_subscription_token,
+            get_state=get_state,
+            min_resubscribe_delay=0.05,
+            max_resubscribe_delay=0.05,
+        )
+        sub.events.on_subscribed = on_subscribed
+        sub.events.on_error = on_error
+
+        await client.connect()
+        await sub.subscribe()
+
+        # First get_state fails -> error emitted -> resubscribe scheduled with
+        # backoff. Second get_state succeeds -> subscribe completes.
+        await asyncio.wait_for(subscribed_future, timeout=5)
+        self.assertGreaterEqual(get_state_calls, 2)
+
+        err_ctx = await asyncio.wait_for(errors_queue.get(), timeout=5)
+        self.assertEqual(
+            err_ctx.code,
+            centrifuge.codes._ErrorCode.SUBSCRIPTION_GET_STATE.value,
+        )
+        self.assertIn("simulated DB failure", str(err_ctx.error))
+
+        await client.disconnect()
+
+    async def test_get_state_persistent_failure_keeps_retrying(self) -> None:
+        channel = "get_state_channel" + uuid.uuid4().hex
+        client = self._new_client()
+
+        get_state_calls = 0
+
+        async def get_state(_channel: str) -> StreamPosition:
+            nonlocal get_state_calls
+            get_state_calls += 1
+            raise Exception("always fails")
+
+        sub = client.new_subscription(
+            channel,
+            get_token=test_get_subscription_token,
+            get_state=get_state,
+            min_resubscribe_delay=0.05,
+            max_resubscribe_delay=0.05,
+        )
+
+        await client.connect()
+        await sub.subscribe()
+
+        # Wait for several retry cycles.
+        await asyncio.sleep(0.5)
+
+        # Should have retried multiple times while staying in subscribing state.
+        self.assertGreater(get_state_calls, 2)
+        self.assertEqual(sub.state, SubscriptionState.SUBSCRIBING)
+
+        await sub.unsubscribe()
+        await client.disconnect()
+
+    async def test_get_state_called_again_on_unrecoverable_position(self) -> None:
+        # Uses "smallhistory" namespace with history_size=2. After publishing
+        # enough to evict old entries, reconnecting from an old position triggers
+        # error 112 (unrecoverable position) because the subscribe request carries
+        # the reject_unrecovered flag. The SDK must then call get_state again to
+        # reload app state instead of delivering recovered=false on an active
+        # subscription.
+        channel = "smallhistory:get_state_" + uuid.uuid4().hex
+
+        # Publisher stays subscribed: used both to publish and to read the
+        # current stream top position via history (as the app's backend would).
+        publisher = self._new_client()
+        publisher_sub = publisher.new_subscription(
+            channel, get_token=test_get_subscription_token
+        )
+        await publisher.connect()
+        await publisher_sub.subscribe()
+
+        client = self._new_client()
+
+        get_state_calls = 0
+
+        async def get_state(_channel: str) -> StreamPosition:
+            nonlocal get_state_calls
+            get_state_calls += 1
+            result = await publisher_sub.history(limit=0)
+            return StreamPosition(offset=result.offset, epoch=result.epoch)
+
+        subscribed_queue = asyncio.Queue()
+        pubs_queue = asyncio.Queue()
+
+        async def on_subscribed(ctx: SubscribedContext) -> None:
+            await subscribed_queue.put(ctx)
+
+        async def on_publication(ctx: PublicationContext) -> None:
+            await pubs_queue.put(ctx.pub.data)
+
+        sub = client.new_subscription(
+            channel,
+            get_token=test_get_subscription_token,
+            get_state=get_state,
+            min_resubscribe_delay=0.05,
+            max_resubscribe_delay=0.05,
+        )
+        sub.events.on_subscribed = on_subscribed
+        sub.events.on_publication = on_publication
+
+        await client.connect()
+        await sub.subscribe()
+        await asyncio.wait_for(subscribed_queue.get(), timeout=5)
+        self.assertEqual(get_state_calls, 1)
+
+        # Disconnect, then publish enough messages to push the stream beyond
+        # recovery (history_size=2, so 5 messages evict old entries).
+        await client.disconnect()
+        for i in range(1, 6):
+            await publisher_sub.publish(data=self._payload(i))
+
+        # Reconnect — SDK tries to recover from the old position, server returns
+        # error 112, SDK resets position and calls get_state again.
+        await client.connect()
+        await asyncio.wait_for(subscribed_queue.get(), timeout=5)
+        self.assertEqual(get_state_calls, 2)
+
+        # Verify live delivery works after the re-sync.
+        await publisher_sub.publish(data={"live": True})
+        data = await asyncio.wait_for(pubs_queue.get(), timeout=5)
+        self.assertEqual(data, {"live": True})
+
+        await client.disconnect()
+        await publisher.disconnect()
