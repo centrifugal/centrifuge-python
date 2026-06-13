@@ -24,6 +24,7 @@ from websockets.protocol import State
 from centrifuge.codecs import _JsonCodec, _ProtobufCodec
 from centrifuge.codes import (
     _ERROR_CODE_UNRECOVERABLE_POSITION,
+    _SUBSCRIPTION_FLAG_CHANNEL_COMPACTION,
     _SUBSCRIPTION_FLAG_REJECT_UNRECOVERED,
     _ConnectingCode,
     _DisconnectedCode,
@@ -193,6 +194,12 @@ class Client:
         self._reconnect_timer = None
         self._headers = headers or {}
         self._server_subs: Dict[str, _ServerSubscription] = {}
+        # Channel compaction: numeric channel ID -> subscription, used to route
+        # pushes that carry an ID instead of the string channel name. IDs are
+        # scoped to a server session — the registry is dropped when the connected
+        # state is cleared and each subscription re-registers from its subscribe
+        # reply.
+        self._subs_by_id: Dict[int, "Subscription"] = {}
         self._connection_lock = asyncio.Lock()
         self._listen_task: Optional[asyncio.Task] = None
         self._process_messages_task: Optional[asyncio.Task] = None
@@ -598,6 +605,11 @@ class Client:
             self._reconnect_timer = None
 
     async def _clear_connected_state(self) -> None:
+        # Channel compaction IDs are scoped to a server session — drop the routing
+        # registry; each resubscribe re-registers a fresh ID. The per-subscription
+        # _push_id is left as-is: the next subscribe reply re-registers it
+        # regardless of whether the server reuses the same ID.
+        self._subs_by_id.clear()
         for sub in self._subs.values():
             if sub.state == SubscriptionState.SUBSCRIBED:
                 unsubscribe_code = _SubscribingCode.TRANSPORT_CLOSED
@@ -946,11 +958,16 @@ class Client:
             subscribe["epoch"] = sub._epoch
             subscribe["offset"] = sub._offset
 
+        # Always offer channel compaction: when the server supports and allows it,
+        # the subscribe result carries a numeric channel ID and subsequent pushes
+        # use that ID instead of the string channel name.
+        flag = _SUBSCRIPTION_FLAG_CHANNEL_COMPACTION
         if sub._get_state:
             # Ask the server to reject the subscribe with error 112 when recovery
             # from the provided position is impossible, instead of returning
             # recovered=false — so we can call get_state again to reload state.
-            subscribe["flag"] = _SUBSCRIPTION_FLAG_REJECT_UNRECOVERED
+            flag |= _SUBSCRIPTION_FLAG_REJECT_UNRECOVERED
+        subscribe["flag"] = flag
 
         if sub._delta:
             subscribe["delta"] = sub._delta.value
@@ -1397,12 +1414,16 @@ class Client:
         elif reply.get("push"):
             logger.debug("received push reply %s", str(reply))
             push = reply["push"]
+            # Channel compaction: pub/join/leave pushes may carry a numeric channel
+            # ID instead of the channel name. Other push types always carry the
+            # channel. int(...) because protobuf int64 decodes to a string.
+            push_id = int(push.get("id", 0))
             if "pub" in push:
-                await self._process_publication(push["channel"], push["pub"])
+                await self._process_publication(push.get("channel", ""), push["pub"], push_id)
             elif "join" in push:
-                await self._process_join(push["channel"], push["join"])
+                await self._process_join(push.get("channel", ""), push["join"], push_id)
             elif "leave" in push:
-                await self._process_leave(push["channel"], push["leave"])
+                await self._process_leave(push.get("channel", ""), push["leave"], push_id)
             elif "unsubscribe" in push:
                 await self._process_unsubscribe(push["channel"], push["unsubscribe"])
             elif "disconnect" in push:
@@ -1412,30 +1433,55 @@ class Client:
         else:
             await self._handle_ping()
 
-    async def _process_publication(self, channel: str, pub: Any) -> None:
-        sub = self._subs.get(channel)
+    def _sub_for_push(self, channel: str, push_id: int) -> Optional["Subscription"]:
+        # Channel compaction: route by numeric channel ID when the push carries
+        # one (the channel name is then omitted), by channel name otherwise. Only
+        # client-side subscriptions negotiate compaction.
+        if push_id > 0:
+            return self._subs_by_id.get(push_id)
+        return self._subs.get(channel)
+
+    def _update_subscription_push_id(
+        self, sub: "Subscription", old_id: int, new_id: int
+    ) -> None:
+        # Remove the old numeric ID mapping (only if it still points to this
+        # subscription) and register the new one. Either ID may be 0 (no mapping).
+        if old_id > 0 and self._subs_by_id.get(old_id) is sub:
+            del self._subs_by_id[old_id]
+        if new_id > 0:
+            self._subs_by_id[new_id] = sub
+
+    async def _process_publication(self, channel: str, pub: Any, push_id: int = 0) -> None:
+        sub = self._sub_for_push(channel, push_id)
         if sub:
             await sub._process_publication(pub)
+        elif push_id > 0:
+            # Compacted push with unknown ID (e.g. already unsubscribed) — drop.
+            return
         else:
             server_sub = self._server_subs.get(channel)
             if server_sub:
                 await self._process_server_publication(channel, pub)
 
-    async def _process_join(self, channel: str, join: Any) -> None:
+    async def _process_join(self, channel: str, join: Any, push_id: int = 0) -> None:
         client_info = self._extract_client_info(join["info"])
-        sub = self._subs.get(channel)
+        sub = self._sub_for_push(channel, push_id)
         if sub:
             await sub.events.on_join(JoinContext(info=client_info))
+        elif push_id > 0:
+            return
         else:
             server_sub = self._server_subs.get(channel)
             if server_sub:
                 await self.events.on_join(ServerJoinContext(channel=channel, info=client_info))
 
-    async def _process_leave(self, channel: str, leave: Any) -> None:
+    async def _process_leave(self, channel: str, leave: Any, push_id: int = 0) -> None:
         client_info = self._extract_client_info(leave["info"])
-        sub = self._subs.get(channel)
+        sub = self._sub_for_push(channel, push_id)
         if sub:
             await sub.events.on_leave(LeaveContext(info=client_info))
+        elif push_id > 0:
+            return
         else:
             server_sub = self._server_subs.get(channel)
             if server_sub:
@@ -1592,6 +1638,9 @@ class Subscription:
         self._offset: int = 0
         self._epoch: str = ""
         self._prev_data: Optional[Any] = None
+        # Numeric channel ID assigned by the server when channel compaction is
+        # negotiated. Pushes then carry this ID instead of the channel name.
+        self._push_id: int = 0
 
         if delta and delta not in {DeltaType.FOSSIL}:
             raise CentrifugeError("unsupported delta format")
@@ -1700,6 +1749,8 @@ class Subscription:
             self._clear_subscribing_state()
 
         self.state = SubscriptionState.UNSUBSCRIBED
+        # Channel compaction ID is no longer valid once unsubscribed.
+        self._set_push_id(0)
 
         if self._subscribed_future.done():
             self._subscribed_future = asyncio.Future()
@@ -1791,6 +1842,11 @@ class Subscription:
 
         self._delta_negotiated = subscribe.get("delta", False)
 
+        # Channel compaction: register the numeric channel ID assigned by the
+        # server (0 when not negotiated — also clears a stale ID from a previous
+        # subscribe session). int(...) because protobuf int64 decodes to a string.
+        self._set_push_id(int(subscribe.get("id", 0)))
+
         await on_subscribed_handler(
             SubscribedContext(
                 channel=self.channel,
@@ -1858,3 +1914,15 @@ class Subscription:
 
     def _need_recover(self):
         return self._recover
+
+    def _set_push_id(self, push_id: int) -> None:
+        # Update the channel compaction ID registration in the client's push
+        # routing registry. Pass 0 to clear (no compaction / sub gone). Always
+        # re-registers even when the ID is unchanged: the client drops the registry
+        # when the connected state is cleared and on reconnect the server commonly
+        # assigns the same ID again, so the registration must be restored.
+        if push_id == 0 and self._push_id == 0:
+            return
+        old_id = self._push_id
+        self._push_id = push_id
+        self._client._update_subscription_push_id(self, old_id, push_id)

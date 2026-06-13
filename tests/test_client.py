@@ -33,6 +33,10 @@ from centrifuge import (
 )
 from websockets.protocol import State
 
+import centrifuge.protocol.client_pb2 as protocol_pb2
+
+from tests.fake_server import FakeCentrifugoServer
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(message)s",
@@ -1755,3 +1759,144 @@ class TestGetState(unittest.IsolatedAsyncioTestCase):
 
         await client.disconnect()
         await publisher.disconnect()
+
+
+
+class TestChannelCompaction(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.channel_id = 42
+        self.server = FakeCentrifugoServer()
+        # Negotiate channel compaction: assign a numeric channel id whenever the
+        # client offers the channelCompaction flag (bit 1).
+        self.server.on_subscribe = lambda _channel, req: protocol_pb2.SubscribeResult(
+            id=self.channel_id if req.flag & 1 else 0
+        )
+        await self.server.start()
+
+    async def asyncTearDown(self):
+        await self.server.stop()
+
+    def _make_client(self):
+        return Client(
+            self.server.url,
+            use_protobuf=True,
+            min_reconnect_delay=0.05,
+            max_reconnect_delay=0.2,
+        )
+
+    async def test_flag_offered_and_pushes_routed_by_id(self):
+        client = self._make_client()
+        subscribed = asyncio.Future()
+        pubs = asyncio.Queue()
+        joins = asyncio.Queue()
+        leaves = asyncio.Queue()
+        sub = client.new_subscription("compacted")
+
+        async def on_subscribed(ctx):
+            if not subscribed.done():
+                subscribed.set_result(ctx)
+
+        sub.events.on_subscribed = on_subscribed
+        sub.events.on_publication = lambda ctx: pubs.put(ctx.pub.data)
+        sub.events.on_join = lambda ctx: joins.put(ctx.info.client)
+        sub.events.on_leave = lambda ctx: leaves.put(ctx.info.client)
+
+        await client.connect()
+        await sub.subscribe()
+        await asyncio.wait_for(subscribed, timeout=5)
+
+        self.assertEqual(self.server.last_subscribe().flag & 1, 1)
+
+        await self.server.publish(b'{"compacted":true}', channel_id=42)
+        self.assertEqual(await asyncio.wait_for(pubs.get(), timeout=5), b'{"compacted":true}')
+
+        await self.server.join("joiner", channel_id=42)
+        self.assertEqual(await asyncio.wait_for(joins.get(), timeout=5), "joiner")
+
+        await self.server.leave("leaver", channel_id=42)
+        self.assertEqual(await asyncio.wait_for(leaves.get(), timeout=5), "leaver")
+
+        await client.disconnect()
+
+    async def test_unknown_id_dropped(self):
+        client = self._make_client()
+        subscribed = asyncio.Future()
+        pubs = asyncio.Queue()
+        sub = client.new_subscription("compacted")
+
+        async def on_subscribed(ctx):
+            if not subscribed.done():
+                subscribed.set_result(ctx)
+
+        sub.events.on_subscribed = on_subscribed
+        sub.events.on_publication = lambda ctx: pubs.put(ctx.pub.data)
+
+        await client.connect()
+        await sub.subscribe()
+        await asyncio.wait_for(subscribed, timeout=5)
+
+        await self.server.publish(b'{"stray":true}', channel_id=99)  # unknown id, dropped
+        await self.server.publish(b'{"ok":true}', channel_id=42)  # known id
+
+        self.assertEqual(await asyncio.wait_for(pubs.get(), timeout=5), b'{"ok":true}')
+        self.assertTrue(pubs.empty())
+
+        await client.disconnect()
+
+    async def test_id_dropped_on_unsubscribe_refreshed_on_resubscribe(self):
+        client = self._make_client()
+        subscribed_queue = asyncio.Queue()
+        unsub_queue = asyncio.Queue()
+        pubs = asyncio.Queue()
+        sub = client.new_subscription("compacted")
+        sub.events.on_subscribed = subscribed_queue.put
+        sub.events.on_unsubscribed = unsub_queue.put
+        sub.events.on_publication = lambda ctx: pubs.put(ctx.pub.data)
+
+        await client.connect()
+        await sub.subscribe()
+        await asyncio.wait_for(subscribed_queue.get(), timeout=5)
+
+        await sub.unsubscribe()
+        await asyncio.wait_for(unsub_queue.get(), timeout=5)
+
+        # Old ID must no longer route to the unsubscribed subscription.
+        await self.server.publish(b'{"stale":true}', channel_id=42)
+
+        # Resubscribe — the server assigns a fresh ID.
+        self.channel_id = 43
+        await sub.subscribe()
+        await asyncio.wait_for(subscribed_queue.get(), timeout=5)
+
+        await self.server.publish(b'{"fresh":true}', channel_id=43)
+        self.assertEqual(await asyncio.wait_for(pubs.get(), timeout=5), b'{"fresh":true}')
+        self.assertTrue(pubs.empty())
+
+        await client.disconnect()
+
+    async def test_same_id_re_registered_after_reconnect(self):
+        # Regression guard (found in the dart port): the client drops the ID
+        # registry on teardown (IDs are server-session-scoped), and on reconnect
+        # the server commonly assigns the SAME ID again. The subscription must
+        # re-register it even though its own remembered ID is unchanged.
+        client = self._make_client()
+        subscribed_queue = asyncio.Queue()
+        pubs = asyncio.Queue()
+        sub = client.new_subscription("compacted")
+        sub.events.on_subscribed = subscribed_queue.put
+        sub.events.on_publication = lambda ctx: pubs.put(ctx.pub.data)
+
+        await client.connect()
+        await sub.subscribe()
+        await asyncio.wait_for(subscribed_queue.get(), timeout=5)
+
+        await client.disconnect()
+        await client.connect()
+        # Subscription auto-resubscribes on reconnect — same ID 42 as before.
+        await asyncio.wait_for(subscribed_queue.get(), timeout=5)
+
+        await self.server.publish(b'{"after_reconnect":true}', channel_id=42)
+        result = await asyncio.wait_for(pubs.get(), timeout=5)
+        self.assertEqual(result, b'{"after_reconnect":true}')
+
+        await client.disconnect()

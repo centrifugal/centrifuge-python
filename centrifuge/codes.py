@@ -69,6 +69,12 @@ class _ErrorCode(Enum):
 
 
 # Subscription feature flags — bitmask sent in SubscribeRequest flag field.
+#
+# Channel compaction asks the server to replace the string channel name with a
+# short numeric ID in subscription pushes (bandwidth optimization). Safe to send
+# unconditionally: servers that don't support or don't allow it ignore the bit
+# and keep sending the full channel name.
+_SUBSCRIPTION_FLAG_CHANNEL_COMPACTION = 1
 _SUBSCRIPTION_FLAG_REJECT_UNRECOVERED = 2
 
 # Server error code returned when recovery from the provided position is
