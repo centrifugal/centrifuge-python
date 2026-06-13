@@ -22,6 +22,7 @@ from websockets import exceptions
 from websockets.protocol import State
 
 from centrifuge.codecs import _JsonCodec, _ProtobufCodec
+from centrifuge.filter import FilterNode
 from centrifuge.codes import (
     _ERROR_CODE_UNRECOVERABLE_POSITION,
     _SUBSCRIPTION_FLAG_CHANNEL_COMPACTION,
@@ -222,10 +223,16 @@ class Client:
         recoverable: bool = False,
         join_leave: bool = False,
         delta: Optional[DeltaType] = None,
+        tags_filter: Optional[FilterNode] = None,
         get_state: Optional[Callable[[str], Awaitable[StreamPosition]]] = None,
     ) -> "Subscription":
         """Creates new subscription to channel. If subscription already exists then
         DuplicateSubscriptionError exception will be raised.
+
+        tags_filter sets a server-side publication filter based on publication
+        tags: the server delivers only publications whose tags match the filter.
+        It must be enabled for the namespace on the server (allow_tags_filter)
+        and cannot be combined with delta. Build it with the Filter helpers.
 
         get_state is called to load the app's current state and stream position.
         Requires Centrifugo >= 6.8.0.
@@ -275,6 +282,7 @@ class Client:
             recoverable=recoverable,
             join_leave=join_leave,
             delta=delta,
+            tags_filter=tags_filter,
             get_state=get_state,
         )
         self._subs[channel] = sub
@@ -972,6 +980,9 @@ class Client:
         if sub._delta:
             subscribe["delta"] = sub._delta.value
 
+        if sub._tags_filter is not None:
+            subscribe["tf"] = sub._tags_filter.node
+
         command = {
             "id": cmd_id,
             "subscribe": subscribe,
@@ -1611,6 +1622,7 @@ class Subscription:
         recoverable: bool = False,
         join_leave: bool = False,
         delta: Optional[DeltaType] = None,
+        tags_filter: Optional[FilterNode] = None,
         get_state: Optional[Callable[[str], Awaitable[StreamPosition]]] = None,
     ) -> None:
         """Initializes Subscription instance.
@@ -1644,8 +1656,11 @@ class Subscription:
 
         if delta and delta not in {DeltaType.FOSSIL}:
             raise CentrifugeError("unsupported delta format")
+        if delta and tags_filter is not None:
+            raise CentrifugeError("cannot use delta and tags filter together")
         self._delta = delta
         self._delta_negotiated: bool = False
+        self._tags_filter = tags_filter
 
     @classmethod
     def _create_instance(cls, *args: Any, **kwargs: Any) -> "Subscription":
@@ -1696,6 +1711,15 @@ class Subscription:
         await self.ready(timeout=timeout)
         # noinspection PyProtectedMember
         return await self._client.publish(self.channel, data, timeout=timeout)
+
+    def set_tags_filter(self, tags_filter: Optional[FilterNode]) -> None:
+        """Sets the server-side publication tags filter. Applied on the next
+        subscribe attempt, not the current one. Pass None to clear it. Cannot be
+        combined with delta compression. Build with the Filter helpers.
+        """
+        if tags_filter is not None and self._delta:
+            raise CentrifugeError("cannot use delta and tags filter together")
+        self._tags_filter = tags_filter
 
     async def subscribe(self) -> None:
         if self.state == SubscriptionState.SUBSCRIBING:
