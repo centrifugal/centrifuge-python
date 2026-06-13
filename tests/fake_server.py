@@ -106,6 +106,13 @@ class FakeCentrifugoServer:
         if self._current_ws is not None:
             await self._current_ws.close()
 
+    async def disconnect_close(self, code, reason):
+        """Close the active connection with a specific code, the way Centrifugo
+        delivers a server disconnect (e.g. 3014 state invalidated) — as a
+        WebSocket close frame rather than a Disconnect push."""
+        if self._current_ws is not None:
+            await self._current_ws.close(code=code, reason=reason)
+
     async def _handler(self, websocket):
         self._current_ws = websocket
         try:
