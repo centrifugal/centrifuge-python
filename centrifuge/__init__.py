@@ -1,6 +1,7 @@
 """Main module of a Centrifuge Python client library."""
 
 from .client import Client, ClientState, Subscription, SubscriptionState, DeltaType
+from .filter import Filter, FilterNode
 from .contexts import (
     ConnectedContext,
     ConnectingContext,
@@ -54,6 +55,8 @@ __all__ = [
     "DisconnectedContext",
     "DuplicateSubscriptionError",
     "ErrorContext",
+    "Filter",
+    "FilterNode",
     "HistoryResult",
     "JoinContext",
     "LeaveContext",
