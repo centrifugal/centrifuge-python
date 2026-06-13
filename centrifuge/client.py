@@ -24,9 +24,11 @@ from websockets.protocol import State
 from centrifuge.codecs import _JsonCodec, _ProtobufCodec
 from centrifuge.filter import FilterNode
 from centrifuge.codes import (
+    _DISCONNECTED_STATE_INVALIDATED,
     _ERROR_CODE_UNRECOVERABLE_POSITION,
     _SUBSCRIPTION_FLAG_CHANNEL_COMPACTION,
     _SUBSCRIPTION_FLAG_REJECT_UNRECOVERED,
+    _UNSUBSCRIBED_STATE_INVALIDATED,
     _ConnectingCode,
     _DisconnectedCode,
     _ErrorCode,
@@ -1287,10 +1289,22 @@ class Client:
             return
         self._disconnecting = True
 
+        if code == _DISCONNECTED_STATE_INVALIDATED:
+            # State invalidated (delivered as a WebSocket close frame or a
+            # Disconnect push, both funnel here): drop the connection token so the
+            # next connect fetches a fresh one via get_token, and invalidate every
+            # subscription's cached state before reconnecting.
+            self._invalidate_connection_state()
+
         try:
             await self._do_disconnect(code, reason, reconnect)
         finally:
             self._disconnecting = False
+
+    def _invalidate_connection_state(self) -> None:
+        self._token = ""
+        for sub in self._subs.values():
+            sub._invalidate_state()
 
     async def _do_disconnect(self, code: int, reason: str, reconnect: bool) -> None:
         if self._ping_timer:
@@ -1405,6 +1419,10 @@ class Client:
             if code < 2500:
                 asyncio.ensure_future(sub._move_unsubscribed(code, unsubscribe["reason"]))
             else:
+                if code == _UNSUBSCRIBED_STATE_INVALIDATED:
+                    # State invalidated: drop the subscription token and cached
+                    # state so the resubscribe obtains a fresh token and re-syncs.
+                    sub._invalidate_state()
                 asyncio.ensure_future(sub._move_subscribing(code, unsubscribe["reason"]))
         else:
             server_sub = self._server_subs.get(channel)
@@ -1950,3 +1968,21 @@ class Subscription:
         old_id = self._push_id
         self._push_id = push_id
         self._client._update_subscription_push_id(self, old_id, push_id)
+
+    def _invalidate_state(self) -> None:
+        # Reset cached subscription state on "state invalidated" (unsubscribe code
+        # 2502 or connection disconnect code 3014) so the resubscribe re-syncs:
+        # clear the token (next subscribe fetches a fresh one via get_token), the
+        # fossil delta base (a stale base would corrupt decoding of the first
+        # publication), and the channel-compaction ID mapping. The recovery
+        # position is reset to a sentinel epoch ("_") the server can never match
+        # (offset 0); the recover flag is left untouched. So a recoverable
+        # subscription resubscribes with was_recovering=True, recovered=False —
+        # letting the app reload via its existing recovery-failure path — while a
+        # non-recoverable one just resubscribes (the sentinel is not sent). The
+        # real epoch/offset are adopted from the subscribe reply.
+        self._token = ""
+        self._offset = 0
+        self._epoch = "_"
+        self._prev_data = None
+        self._set_push_id(0)
