@@ -744,6 +744,7 @@ class Client:
         command = {
             "id": cmd_id,
             "sub_refresh": {
+                "channel": channel,
                 "token": token,
             },
         }
