@@ -23,7 +23,7 @@ class TestSubRefreshWire(unittest.IsolatedAsyncioTestCase):
     async def test_sub_refresh_includes_channel(self):
         # Subscribe reply advertises a short-lived token so the client schedules
         # a sub_refresh almost immediately.
-        self.server.on_subscribe = lambda ch, req: protocol.SubscribeResult(
+        self.server.on_subscribe = lambda _ch, _req: protocol.SubscribeResult(
             expires=True, ttl=1
         )
 
@@ -32,11 +32,11 @@ class TestSubRefreshWire(unittest.IsolatedAsyncioTestCase):
         def on_command(cmd):
             if cmd.HasField("sub_refresh") and not sub_refresh_cmd.done():
                 sub_refresh_cmd.set_result(cmd.sub_refresh)
-            return None  # fall through to default handling
+            # Returning None falls through to the server's default handling.
 
         self.server.on_command = on_command
 
-        async def get_token(channel):
+        async def get_token(_channel):
             return "refreshed-sub-token"
 
         client = Client(self.server.url, use_protobuf=True)
