@@ -103,6 +103,10 @@ Event callbacks are called by SDK using `await` internally, the websocket connec
 
 The fact WebSocket read is blocked for the time we execute callbacks means that you can not call awaitable SDK APIs from callback – because SDK does not have a chance to read the reply. You will get `OperationTimeoutError` exception. The rule is the same - do the work asynchronously, for example use `asyncio.ensure_future`.
 
+## Callbacks should not raise
+
+Callbacks are awaited as part of the SDK's own flow, and exceptions escaping them are not caught. Handle errors inside the callback – especially in `on_error`, which is often the place where something is reported to an external service: an exception raised there escapes while the SDK is handling a failed connection, and the client can be left in `connecting` state with no reconnect scheduled. Such an exception is not reported anywhere, so this is easy to miss.
+
 ## Run example
 
 To run [example](https://github.com/centrifugal/centrifuge-python/blob/master/example.py), first start Centrifugo – the [docker-compose.yml](https://github.com/centrifugal/centrifuge-python/blob/master/docker-compose.yml) of this repo configures everything the example needs (it's the same server the tests use):
