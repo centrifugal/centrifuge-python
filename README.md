@@ -71,6 +71,32 @@ client = Client(
 )
 ```
 
+## Connecting through a proxy
+
+By default the proxy configuration is taken from the environment (`WS_PROXY`/`WSS_PROXY`, `HTTP_PROXY`/`HTTPS_PROXY`, honoring `NO_PROXY`). To set the proxy explicitly – use `proxy` option of `Client` constructor:
+
+```python
+client = Client(
+    "ws://localhost:8000/connection/websocket",
+    proxy="http://user:pass@proxy-host:3128",
+)
+```
+
+Pass `proxy=None` to always connect directly, ignoring the environment configuration.
+
+SOCKS proxies (`socks5://...`) are supported too, but require the [python-socks](https://pypi.org/project/python-socks/) package to be installed:
+
+```bash
+pip install python-socks
+```
+
+Proxy support in `websockets` appeared in version 15.0 – with older versions the client always connects directly, ignoring both the `proxy` option and the environment configuration. Setting a proxy URL there raises `ValueError` from the `Client` constructor, so that the option does not silently do nothing. Invalid proxy URLs and a missing `python-socks` package are reported the same way.
+
+A couple of things to keep in mind when going through a proxy:
+
+* with a `wss://` address the proxy only sees the `CONNECT host:port` request – the WebSocket traffic inside the tunnel stays encrypted end to end, and the server certificate is still verified as usual. With a `ws://` address the proxy sees everything, including the connection token.
+* credentials in an `http://` proxy URL are sent to the proxy as a base64-encoded `Proxy-Authorization` header over an unencrypted connection. They are never forwarded to the Centrifugo server, but use an `https://` proxy if the proxy connection itself may be observed.
+
 ## Callbacks should not block
 
 Event callbacks are called by SDK using `await` internally, the websocket connection read loop is blocked for the time SDK waits for the callback to be executed. This means that if you need to perform long operations in callbacks consider moving the work to a separate coroutine/task to return fast and continue reading data from the websocket.

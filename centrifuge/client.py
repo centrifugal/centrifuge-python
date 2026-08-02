@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import contextlib
+import importlib.util
 import logging
 import ssl
 from asyncio import TimerHandle
@@ -12,6 +13,7 @@ from typing import (
     Any,
     Awaitable,
     Dict,
+    Literal,
     Optional,
     Union,
     List,
@@ -94,6 +96,80 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("centrifuge")
 
+# The proxy argument of websockets.connect() appeared in websockets 15.0, while
+# this SDK still supports websockets 14.x - so the option is validated upfront to
+# fail with a clear message instead of a TypeError from deep inside websockets.
+_PROXY_MIN_WEBSOCKETS_VERSION = (15, 0)
+
+
+def _websockets_supports_proxy() -> bool:
+    try:
+        major, minor = (int(part) for part in websockets.__version__.split(".")[:2])
+    except ValueError:
+        # Unexpected version format (development build?) - assume support and let
+        # websockets complain if the option is not there.
+        return True
+    return (major, minor) >= _PROXY_MIN_WEBSOCKETS_VERSION
+
+
+def _python_socks_installed() -> bool:
+    return importlib.util.find_spec("python_socks") is not None
+
+
+def _redact_proxy(proxy: str) -> str:
+    """Strip credentials from a proxy URL, so that it's safe to put in an error message."""
+    scheme, separator, rest = proxy.partition("://")
+    if not separator:
+        # Malformed URL without a scheme - it may still carry credentials.
+        scheme, rest = "", proxy
+    _, at, hostinfo = rest.rpartition("@")
+    if not at:
+        return proxy
+    return f"{scheme}{separator}***@{hostinfo}"
+
+
+def _validate_proxy(proxy: Union[str, Literal[True], None]) -> None:
+    """Validate the proxy option in the constructor, raising ValueError if it can't work.
+
+    Proxy misconfiguration is checked upfront because errors raised in the middle
+    of connecting are easy to miss: from the automatic reconnect task they end up
+    as an unretrieved task exception, and those which are neither OSError nor
+    WebSocketException (like the ImportError raised for a SOCKS proxy without
+    python-socks installed) are not even reported to the on_error handler.
+    """
+    if proxy is True or proxy is None:
+        # True is the websockets default (take the proxy from the environment) and
+        # None means connecting directly - which is what websockets < 15.0 does
+        # anyway, so neither needs a recent websockets nor further validation.
+        return
+
+    if not isinstance(proxy, str):
+        raise ValueError(f"proxy must be a proxy URL, None or True, got {proxy!r}")
+
+    if not _websockets_supports_proxy():
+        raise ValueError(
+            "proxy URL requires websockets >= 15.0, "
+            f"installed version is {websockets.__version__}"
+        )
+
+    try:
+        # Only available since websockets 15.0, hence the local import.
+        from websockets.uri import parse_proxy  # noqa: PLC0415
+    except ImportError:  # pragma: no cover - in case websockets moves the helper.
+        return
+
+    try:
+        parsed = parse_proxy(proxy)
+    except exceptions.InvalidProxy as e:
+        # Not str(e) - it embeds the proxy URL as is, together with the
+        # credentials it may contain, into a message which likely gets logged.
+        raise ValueError(f"{_redact_proxy(proxy)} isn't a valid proxy: {e.msg}") from e
+
+    if parsed.scheme.startswith("socks") and not _python_socks_installed():
+        raise ValueError(
+            f"{parsed.scheme} proxy requires the python-socks package to be installed"
+        )
+
 
 class ClientState(Enum):
     """ClientState represents possible states of Client connection."""
@@ -155,6 +231,7 @@ class Client:
         headers: Optional[Dict[str, str]] = None,
         loop: Optional["AbstractEventLoop"] = None,
         ssl_context: Optional[ssl.SSLContext] = None,
+        proxy: Union[str, Literal[True], None] = True,
     ):
         """Initializes new Client instance.
 
@@ -169,9 +246,20 @@ class Client:
         custom CA or (not recommended in production) to skip certificate
         verification. When not set, a default TLS context is used. Passing it
         together with a ws:// address is an error.
+
+        proxy sets the proxy to connect through, in the form
+        "http://user:pass@host:port" ("socks5://..." also works, but requires the
+        python-socks package to be installed). Setting a proxy URL requires
+        websockets >= 15.0. By default (proxy=True) proxy configuration is taken
+        from the environment (WS_PROXY/WSS_PROXY, HTTP_PROXY/HTTPS_PROXY, honoring
+        NO_PROXY) - note that websockets < 15.0 has no proxy support at all and
+        always connects directly. Pass None to always connect directly, ignoring
+        the environment configuration.
         """
         if ssl_context is not None and not address.lower().startswith("wss://"):
             raise ValueError("ssl_context option is only applicable to wss:// addresses")
+
+        _validate_proxy(proxy)
 
         self.state: ClientState = ClientState.DISCONNECTED
         self.events: ClientEventHandler = events or ClientEventHandler()
@@ -207,6 +295,7 @@ class Client:
         self._reconnect_timer = None
         self._headers = headers or {}
         self._ssl_context = ssl_context
+        self._proxy = proxy
         self._server_subs: Dict[str, _ServerSubscription] = {}
         # Channel compaction: numeric channel ID -> subscription, used to route
         # pushes that carry an ID instead of the string channel name. IDs are
@@ -387,6 +476,11 @@ class Client:
                 # ssl=None as "no TLS" and raises ValueError for it on a wss://
                 # address, instead of falling back to the default TLS context.
                 connect_kwargs["ssl"] = self._ssl_context
+            if self._proxy is not True:
+                # Only pass proxy when configured: True is the websockets default
+                # (take proxy from the environment) and websockets < 15.0 does not
+                # accept the argument at all.
+                connect_kwargs["proxy"] = self._proxy
 
             try:
                 self._conn = await websockets.connect(
@@ -395,7 +489,11 @@ class Client:
                     additional_headers=self._headers,
                     **connect_kwargs,
                 )
-            except (OSError, exceptions.WebSocketException) as e:
+            except (OSError, exceptions.WebSocketException, ImportError) as e:
+                # ImportError is what websockets raises for a SOCKS proxy without
+                # python-socks installed. An explicitly configured proxy is checked
+                # in the constructor, but a proxy coming from the environment can
+                # only fail here - and it must not escape into the reconnect task.
                 handler = self.events.on_error
                 await handler(
                     ErrorContext(code=_code_number(_ErrorCode.TRANSPORT_CLOSED), error=e)
