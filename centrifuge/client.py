@@ -2,6 +2,7 @@ import asyncio
 import base64
 import contextlib
 import logging
+import ssl
 from asyncio import TimerHandle
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -153,6 +154,7 @@ class Client:
         max_reconnect_delay: float = 20.0,
         headers: Optional[Dict[str, str]] = None,
         loop: Optional["AbstractEventLoop"] = None,
+        ssl_context: Optional[ssl.SSLContext] = None,
     ):
         """Initializes new Client instance.
 
@@ -162,7 +164,15 @@ class Client:
             - connecting (when connect called, or when automatic reconnection is in progress)
             - connected (after successful connect)
         See more details about SDK behaviour in https://centrifugal.dev/docs/transports/client_api.
+
+        ssl_context customizes TLS for wss:// addresses - for example to trust a
+        custom CA or (not recommended in production) to skip certificate
+        verification. When not set, a default TLS context is used. Passing it
+        together with a ws:// address is an error.
         """
+        if ssl_context is not None and not address.lower().startswith("wss://"):
+            raise ValueError("ssl_context option is only applicable to wss:// addresses")
+
         self.state: ClientState = ClientState.DISCONNECTED
         self.events: ClientEventHandler = events or ClientEventHandler()
         self._address: str = address
@@ -196,6 +206,7 @@ class Client:
         self._reconnect_attempts = 0
         self._reconnect_timer = None
         self._headers = headers or {}
+        self._ssl_context = ssl_context
         self._server_subs: Dict[str, _ServerSubscription] = {}
         # Channel compaction: numeric channel ID -> subscription, used to route
         # pushes that carry an ID instead of the string channel name. IDs are
@@ -369,11 +380,20 @@ class Client:
             subprotocols = []
             if self._use_protobuf:
                 subprotocols = ["centrifuge-protobuf"]
+
+            connect_kwargs: Dict[str, Any] = {}
+            if self._ssl_context is not None:
+                # Only pass ssl when explicitly configured: websockets treats
+                # ssl=None as "no TLS" and raises ValueError for it on a wss://
+                # address, instead of falling back to the default TLS context.
+                connect_kwargs["ssl"] = self._ssl_context
+
             try:
                 self._conn = await websockets.connect(
                     self._address,
                     subprotocols=subprotocols,
                     additional_headers=self._headers,
+                    **connect_kwargs,
                 )
             except (OSError, exceptions.WebSocketException) as e:
                 handler = self.events.on_error
