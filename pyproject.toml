@@ -40,7 +40,11 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "websockets>=14.0.0,<16.0.0",
+    # 14.1 is the floor: Connection.close_code / close_reason, which the client
+    # uses to turn a server close frame into a disconnect code, only appeared
+    # there - on 14.0 the client raises AttributeError on close and reconnects
+    # in a loop instead of handling terminal disconnect codes.
+    "websockets>=14.1,<16.0.0",
     "protobuf>=4.23.4,<7.0.0",
 ]
 
