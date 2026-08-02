@@ -22,7 +22,8 @@ jobs:
           - "5.29.3"
           - "6.31.0"
         websockets-version:
-          - "14.2"
+          # Lowest supported version (see pyproject.toml) and the latest one.
+          - "14.1"
           - "15.0"
 
     runs-on: ${{ matrix.os }}
