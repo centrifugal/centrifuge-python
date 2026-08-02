@@ -40,16 +40,18 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    # 14.1 is the floor: Connection.close_code / close_reason, which the client
-    # uses to turn a server close frame into a disconnect code, only appeared
-    # there - on 14.0 the client raises AttributeError on close and reconnects
-    # in a loop instead of handling terminal disconnect codes.
-    "websockets>=14.1,<18.0.0",
-    # On Python 3.14 the floor is protobuf 5.27.0: importing generated code with
-    # an older runtime there fails with "Metaclasses with custom tp_new are not
-    # supported". Older Pythons keep working with the whole supported range.
-    "protobuf>=4.23.4,<8.0.0; python_version < '3.14'",
-    "protobuf>=5.27.0,<8.0.0; python_version >= '3.14'",
+    # 15.0 is the floor: it is the first release with proxy support, so the SDK
+    # does not have to detect whether the proxy option can work at all. Note that
+    # 14.1 was the previous floor for Connection.close_code / close_reason, which
+    # the client uses to turn a server close frame into a disconnect code.
+    "websockets>=15.0,<18.0.0",
+    # protobuf floors are set by security fixes: 4.25.9 and 5.29.6 are the oldest
+    # releases of their lines without GHSA-8qvm-5x2c-j2w7 (DoS while parsing) and
+    # GHSA-7gcm-g887-7qv7 (JSON recursion depth bypass). On Python 3.14 the 4.x
+    # line can not be used at all - importing generated code there fails with
+    # "Metaclasses with custom tp_new are not supported" before protobuf 5.27.0.
+    "protobuf>=4.25.9,<8.0.0; python_version < '3.14'",
+    "protobuf>=5.29.6,<8.0.0; python_version >= '3.14'",
 ]
 
 dynamic = ["version"]

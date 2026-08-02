@@ -96,21 +96,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("centrifuge")
 
-# The proxy argument of websockets.connect() appeared in websockets 15.0, while
-# this SDK still supports websockets 14.x - so the option is validated upfront to
-# fail with a clear message instead of a TypeError from deep inside websockets.
-_PROXY_MIN_WEBSOCKETS_VERSION = (15, 0)
-
-
-def _websockets_supports_proxy() -> bool:
-    try:
-        major, minor = (int(part) for part in websockets.__version__.split(".")[:2])
-    except ValueError:
-        # Unexpected version format (development build?) - assume support and let
-        # websockets complain if the option is not there.
-        return True
-    return (major, minor) >= _PROXY_MIN_WEBSOCKETS_VERSION
-
 
 def _python_socks_installed() -> bool:
     return importlib.util.find_spec("python_socks") is not None
@@ -155,18 +140,12 @@ def _validate_proxy(proxy: Union[str, Literal[True], None]) -> None:
     python-socks installed) are not even reported to the on_error handler.
     """
     if proxy is True or proxy is None:
-        # True is the websockets default (take the proxy from the environment) and
-        # None means connecting directly - which is what websockets < 15.0 does
-        # anyway, so neither needs a recent websockets nor further validation.
+        # True (take the proxy from the environment, the websockets default) and
+        # None (always connect directly) need no further validation.
         return
 
     if not isinstance(proxy, str):
         raise ValueError(f"proxy must be a proxy URL, None or True, got {proxy!r}")
-
-    if not _websockets_supports_proxy():
-        raise ValueError(
-            f"proxy URL requires websockets >= 15.0, installed version is {websockets.__version__}"
-        )
 
     parse_proxy = _load_parse_proxy()
     if parse_proxy is None:  # pragma: no cover - in case websockets moves it again.
@@ -263,12 +242,10 @@ class Client:
 
         proxy sets the proxy to connect through, in the form
         "http://user:pass@host:port" ("socks5://..." also works, but requires the
-        python-socks package to be installed). Setting a proxy URL requires
-        websockets >= 15.0. By default (proxy=True) proxy configuration is taken
-        from the environment (WS_PROXY/WSS_PROXY, HTTP_PROXY/HTTPS_PROXY, honoring
-        NO_PROXY) - note that websockets < 15.0 has no proxy support at all and
-        always connects directly. Pass None to always connect directly, ignoring
-        the environment configuration.
+        python-socks package to be installed). By default (proxy=True) proxy
+        configuration is taken from the environment (WS_PROXY/WSS_PROXY,
+        HTTP_PROXY/HTTPS_PROXY, honoring NO_PROXY). Pass None to always connect
+        directly, ignoring the environment configuration.
         """
         if ssl_context is not None and not address.lower().startswith("wss://"):
             raise ValueError("ssl_context option is only applicable to wss:// addresses")
@@ -514,15 +491,11 @@ class Client:
                 # ssl=None as "no TLS" and raises ValueError for it on a wss://
                 # address, instead of falling back to the default TLS context.
                 connect_kwargs["ssl"] = self._ssl_context
-            if self._proxy is not True:
-                # Only pass proxy when configured: True is the websockets default
-                # (take proxy from the environment) and websockets < 15.0 does not
-                # accept the argument at all.
-                connect_kwargs["proxy"] = self._proxy
 
             try:
                 self._conn = await websockets.connect(
                     self._address,
+                    proxy=self._proxy,
                     subprotocols=subprotocols,
                     additional_headers=self._headers,
                     **connect_kwargs,

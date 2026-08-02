@@ -90,7 +90,7 @@ SOCKS proxies (`socks5://...`) are supported too, but require the [python-socks]
 pip install python-socks
 ```
 
-Proxy support in `websockets` appeared in version 15.0 – with older versions the client always connects directly, ignoring both the `proxy` option and the environment configuration. Setting a proxy URL there raises `ValueError` from the `Client` constructor, so that the option does not silently do nothing. Invalid proxy URLs and a missing `python-socks` package are reported the same way.
+Invalid proxy URLs and a missing `python-socks` package are reported as `ValueError` from the `Client` constructor, rather than in the middle of connecting.
 
 A couple of things to keep in mind when going through a proxy:
 

@@ -9,8 +9,6 @@ import tempfile
 import unittest
 from unittest import mock
 
-import websockets
-
 import centrifuge.client
 from centrifuge import Client, ClientState
 from tests.fake_server import FakeCentrifugoServer
@@ -19,11 +17,6 @@ from tests.test_ssl import _generate_cert
 # Tests for the proxy option (https://github.com/centrifugal/centrifuge-python/issues/45),
 # exercised against a minimal in-process HTTP proxy (CONNECT method) in front of
 # the FakeCentrifugoServer.
-
-requires_proxy_support = unittest.skipUnless(
-    centrifuge.client._websockets_supports_proxy(),
-    f"proxy requires websockets >= 15.0, installed {websockets.__version__}",
-)
 
 
 async def _pipe(reader, writer, recorder=None):
@@ -149,7 +142,6 @@ class TestProxyBase(unittest.IsolatedAsyncioTestCase):
         return f"localhost:{self.server.port}"
 
 
-@requires_proxy_support
 class TestHTTPProxy(TestProxyBase):
     async def test_connects_through_proxy(self):
         client = Client(self.server.url, use_protobuf=True, proxy=self.proxy.url)
@@ -203,7 +195,6 @@ class TestHTTPProxy(TestProxyBase):
         await client.disconnect()
 
 
-@requires_proxy_support
 class TestHTTPProxyAuth(TestProxyBase):
     proxy_username = "user"
     proxy_password = "pass"  # noqa: S105 - test credentials.
@@ -231,7 +222,6 @@ class TestHTTPProxyAuth(TestProxyBase):
         self.assertNotIn(b"user:pass", tunneled)
 
 
-@requires_proxy_support
 @unittest.skipUnless(shutil.which("openssl"), "openssl is required to generate a test cert")
 class TestProxyWithTLS(unittest.IsolatedAsyncioTestCase):
     """A proxy must not weaken TLS: the tunnel stays end to end encrypted."""
@@ -312,16 +302,6 @@ class TestProxyValidation(unittest.IsolatedAsyncioTestCase):
 
     address = "ws://localhost:8000/connection/websocket"
 
-    async def test_proxy_url_requires_recent_websockets(self):
-        with mock.patch("centrifuge.client._websockets_supports_proxy", return_value=False):
-            with self.assertRaises(ValueError):  # noqa: PT027
-                Client(self.address, proxy="http://localhost:3128")
-            # The default (proxy from environment) keeps working on old websockets.
-            Client(self.address)
-            # So does connecting directly - which is all old websockets ever does.
-            Client(self.address, proxy=None)
-
-    @requires_proxy_support
     async def test_invalid_proxy_url_raises(self):
         for proxy in (
             "bogus://localhost:3128",  # Unsupported scheme.
@@ -331,14 +311,12 @@ class TestProxyValidation(unittest.IsolatedAsyncioTestCase):
             with self.subTest(proxy=proxy), self.assertRaises(ValueError):  # noqa: PT027
                 Client(self.address, proxy=proxy)
 
-    @requires_proxy_support
     async def test_non_string_proxy_raises(self):
         # False is a natural way to spell "no proxy" - websockets would only
         # reject it while connecting, with a message about an empty scheme.
         with self.assertRaises(ValueError):  # noqa: PT027
             Client(self.address, proxy=False)
 
-    @requires_proxy_support
     async def test_socks_proxy_without_python_socks_raises(self):
         with mock.patch("centrifuge.client._python_socks_installed", return_value=False):
             with self.assertRaises(ValueError):  # noqa: PT027
@@ -346,19 +324,16 @@ class TestProxyValidation(unittest.IsolatedAsyncioTestCase):
             # An HTTP proxy does not need python-socks.
             Client(self.address, proxy="http://localhost:3128")
 
-    @requires_proxy_support
     async def test_socks_proxy_accepted_with_python_socks(self):
         with mock.patch("centrifuge.client._python_socks_installed", return_value=True):
             Client(self.address, proxy="socks5://localhost:1080")
 
-    @requires_proxy_support
     async def test_proxy_url_parser_is_found(self):
         # websockets moved parse_proxy from websockets.uri to websockets.proxy in
         # 16.0. If it moves again, validation below silently turns into a no-op -
         # the other tests here would catch that, but only indirectly.
         self.assertIsNotNone(centrifuge.client._load_parse_proxy())
 
-    @requires_proxy_support
     async def test_validation_error_does_not_leak_credentials(self):
         # Constructor errors end up in logs and error trackers, so the proxy URL
         # must not be echoed back with its credentials in place.
@@ -370,7 +345,6 @@ class TestProxyValidation(unittest.IsolatedAsyncioTestCase):
         self.assertIn("***@localhost:3128", message)
 
 
-@requires_proxy_support
 @unittest.skipIf(
     centrifuge.client._python_socks_installed(),
     "test needs python-socks to be absent to trigger the ImportError",
