@@ -50,11 +50,12 @@ class TestBackgroundTasks(unittest.IsolatedAsyncioTestCase):
         async def sleeper():
             await asyncio.sleep(10)
 
-        task = self.client._spawn(sleeper())
-        await asyncio.sleep(0)
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-        await asyncio.sleep(0)
+        with self.assertNoLogs("centrifuge", level=logging.ERROR):
+            task = self.client._spawn(sleeper())
+            await asyncio.sleep(0)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0)  # let the done callback run
 
         self.assertNotIn(task, self.client._background_tasks)

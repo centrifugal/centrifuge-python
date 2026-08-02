@@ -281,7 +281,7 @@ class Client:
         self.__connected_future: Optional[asyncio.Future] = None
         self._token = token
         self._get_token = get_token
-        self._explicit_loop = loop
+        self._bound_loop = loop
         self._inflight_commands: Dict[int, _Callback] = {}
         self._reconnect_attempts = 0
         self._reconnect_timer = None
@@ -325,7 +325,7 @@ class Client:
 
     @property
     def _connected_future(self) -> asyncio.Future:
-        # Created on first use for the same reason as the loop above:
+        # Created on first use for the same reason as the loop below:
         # asyncio.Future() binds to the current loop, which does not exist yet
         # when the Client is constructed outside of asyncio.run().
         if self.__connected_future is None:
@@ -343,9 +343,9 @@ class Client:
         # no running loop, and a Client is usually created before asyncio.run()
         # starts one. Every use happens inside a running loop, so by then it is
         # available - and it is remembered to keep the client bound to one loop.
-        if self._explicit_loop is None:
-            self._explicit_loop = asyncio.get_running_loop()
-        return self._explicit_loop
+        if self._bound_loop is None:
+            self._bound_loop = asyncio.get_running_loop()
+        return self._bound_loop
 
     def subscriptions(self) -> Dict[str, "Subscription"]:
         """Returns a copy of subscriptions dict."""

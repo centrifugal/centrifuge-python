@@ -105,7 +105,7 @@ The fact WebSocket read is blocked for the time we execute callbacks means that 
 
 ## Callbacks should not raise
 
-Callbacks are awaited as part of the SDK's own flow, and exceptions escaping them are not caught. Handle errors inside the callback – especially in `on_error`, which is often the place where something is reported to an external service: an exception raised there escapes while the SDK is handling a failed connection, and the client can be left in `connecting` state with no reconnect scheduled. Such an exception is not reported anywhere, so this is easy to miss.
+Callbacks are awaited as part of the SDK's own flow, and exceptions escaping them are not caught. Handle errors inside the callback – especially in `on_error`, which is often the place where something is reported to an external service: an exception raised there escapes while the SDK is handling a failed connection, and the client can be left in `connecting` state with no reconnect scheduled. The SDK logs such an exception through its `centrifuge` logger, and that log is the only sign of it – so keep an eye on error logs.
 
 ## Run example
 
