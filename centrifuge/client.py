@@ -15,6 +15,7 @@ from typing import (
     Dict,
     Literal,
     Optional,
+    Set,
     Union,
     List,
     Callable,
@@ -297,7 +298,30 @@ class Client:
         self._connection_lock = asyncio.Lock()
         self._listen_task: Optional[asyncio.Task] = None
         self._process_messages_task: Optional[asyncio.Task] = None
+        self._background_tasks: Set[asyncio.Task] = set()
         self._disconnecting = False
+
+    def _spawn(self, coro: Awaitable[Any]) -> asyncio.Task:
+        """Start a background task nothing is going to await.
+
+        The task is kept in a set until it finishes: the event loop only holds
+        weak references to tasks, so a fire-and-forget one may be garbage
+        collected before it completes. Its outcome is inspected when it is done,
+        because an exception in a task nobody awaits is otherwise reported at
+        best late (when the task is collected) and at worst not at all.
+        """
+        task = asyncio.ensure_future(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_task_done)
+        return task
+
+    def _background_task_done(self, task: asyncio.Task) -> None:
+        self._background_tasks.discard(task)
+        if task.cancelled():
+            return
+        exception = task.exception()
+        if exception is not None:
+            logger.error("unhandled exception in background task", exc_info=exception)
 
     @property
     def _connected_future(self) -> asyncio.Future:
@@ -460,7 +484,7 @@ class Client:
         logger.debug("start reconnecting in %f", delay)
         self._reconnect_timer = self._loop.call_later(
             delay,
-            lambda: asyncio.ensure_future(self._reconnect()),
+            lambda: self._spawn(self._reconnect()),
         )
 
     async def _reconnect(self) -> None:
@@ -509,7 +533,7 @@ class Client:
                 await handler(
                     ErrorContext(code=_code_number(_ErrorCode.TRANSPORT_CLOSED), error=e)
                 )
-                asyncio.ensure_future(self._schedule_reconnect())
+                self._spawn(self._schedule_reconnect())
                 return False
 
             # Re-check state after async websockets.connect()
@@ -531,7 +555,7 @@ class Client:
                     await handler(
                         ErrorContext(code=_code_number(_ErrorCode.CLIENT_CONNECT_TOKEN), error=e),
                     )
-                    asyncio.ensure_future(self._schedule_reconnect())
+                    self._spawn(self._schedule_reconnect())
                     return False
 
                 self._token = token
@@ -553,8 +577,8 @@ class Client:
                     await self._process_messages_task
 
             # Track background tasks for proper cleanup
-            self._listen_task = asyncio.ensure_future(self._listen())
-            self._process_messages_task = asyncio.ensure_future(self._process_messages())
+            self._listen_task = self._spawn(self._listen())
+            self._process_messages_task = self._spawn(self._process_messages())
 
             self._delay = self._min_reconnect_delay
 
@@ -625,7 +649,7 @@ class Client:
                             self._refresh_timer.cancel()
                         self._refresh_timer = self._loop.call_later(
                             ttl,
-                            lambda: asyncio.ensure_future(self._refresh(), loop=self._loop),
+                            lambda: self._spawn(self._refresh()),
                         )
 
                     self._connected_future.set_result(True)
@@ -646,7 +670,7 @@ class Client:
                         sub = self._subs[channel]
                         if not sub or sub.state != SubscriptionState.SUBSCRIBING:
                             continue
-                        asyncio.ensure_future(self._subscribe(channel))
+                        self._spawn(self._subscribe(channel))
 
                     await self._process_server_subs(connect.get("subs", {}))
 
@@ -839,7 +863,7 @@ class Client:
                 self._refresh_timer.cancel()
             self._refresh_timer = self._loop.call_later(
                 ttl,
-                lambda: asyncio.ensure_future(self._refresh(), loop=self._loop),
+                lambda: self._spawn(self._refresh()),
             )
 
     async def _sub_refresh(self, channel: str):
@@ -865,7 +889,7 @@ class Client:
                     error=e,
                 ),
             )
-            asyncio.ensure_future(sub._schedule_resubscribe())
+            self._spawn(sub._schedule_resubscribe())
             return
 
         cmd_id = self._next_command_id()
@@ -913,7 +937,7 @@ class Client:
                 sub._refresh_timer.cancel()
             sub._refresh_timer = self._loop.call_later(
                 ttl,
-                lambda: asyncio.ensure_future(sub._refresh(), loop=self._loop),
+                lambda: self._spawn(sub._refresh()),
             )
 
     @staticmethod
@@ -957,7 +981,7 @@ class Client:
                         error=e,
                     ),
                 )
-                asyncio.ensure_future(sub._schedule_resubscribe())
+                self._spawn(sub._schedule_resubscribe())
                 return False
 
             sub._token = token
@@ -1052,7 +1076,7 @@ class Client:
                     error=e,
                 ),
             )
-            asyncio.ensure_future(sub._schedule_resubscribe())
+            self._spawn(sub._schedule_resubscribe())
             return False
 
         # Re-check subscription state after async get_state()
@@ -1123,7 +1147,7 @@ class Client:
 
     async def _resubscribe(self, sub: "Subscription"):
         self._subs[sub.channel] = sub
-        asyncio.ensure_future(self._subscribe(sub.channel))
+        self._spawn(self._subscribe(sub.channel))
 
     async def _unsubscribe(self, channel: str):
         sub = self._subs.get(channel)
@@ -1496,7 +1520,7 @@ class Client:
         await handler(DisconnectedContext(code=code, reason=reason))
 
         if reconnect:
-            asyncio.ensure_future(self._schedule_reconnect())
+            self._spawn(self._schedule_reconnect())
 
     async def _consume_connected_future(self) -> None:
         with contextlib.suppress(CentrifugeError):
@@ -1511,7 +1535,7 @@ class Client:
             self._ping_timer.cancel()
         self._ping_timer = self._loop.call_later(
             self._ping_interval + self._max_server_ping_delay,
-            lambda: asyncio.ensure_future(self._no_ping(), loop=self._loop),
+            lambda: self._spawn(self._no_ping()),
         )
 
     async def _handle_ping(self) -> None:
@@ -1547,13 +1571,13 @@ class Client:
         code = unsubscribe["code"]
         if sub:
             if code < 2500:
-                asyncio.ensure_future(sub._move_unsubscribed(code, unsubscribe["reason"]))
+                self._spawn(sub._move_unsubscribed(code, unsubscribe["reason"]))
             else:
                 if code == _UNSUBSCRIBED_STATE_INVALIDATED:
                     # State invalidated: drop the subscription token and cached
                     # state so the resubscribe obtains a fresh token and re-syncs.
                     sub._invalidate_state()
-                asyncio.ensure_future(sub._move_subscribing(code, unsubscribe["reason"]))
+                self._spawn(sub._move_subscribing(code, unsubscribe["reason"]))
         else:
             server_sub = self._server_subs.get(channel)
             if server_sub:
@@ -1970,7 +1994,7 @@ class Subscription:
         )
 
         if not skip_schedule_resubscribe:
-            asyncio.ensure_future(self._client._resubscribe(self))
+            self._client._spawn(self._client._resubscribe(self))
 
     async def _move_subscribed(self, subscribe: Dict[str, Any]) -> None:
         # Only transition to SUBSCRIBED from SUBSCRIBING state
@@ -2007,7 +2031,7 @@ class Subscription:
                 self._refresh_timer.cancel()
             self._refresh_timer = self._client._loop.call_later(
                 ttl,
-                lambda: asyncio.ensure_future(self._refresh(), loop=self._client._loop),
+                lambda: self._client._spawn(self._refresh()),
             )
 
         self._delta_negotiated = subscribe.get("delta", False)
@@ -2060,7 +2084,7 @@ class Subscription:
         logger.debug("start resubscribing in %f", delay)
         self._resubscribe_timer = self._client._loop.call_later(
             delay,
-            lambda: asyncio.ensure_future(self._resubscribe()),
+            lambda: self._client._spawn(self._resubscribe()),
         )
 
     async def _resubscribe(self) -> None:

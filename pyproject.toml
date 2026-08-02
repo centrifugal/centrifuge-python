@@ -141,7 +141,6 @@ ignore = [
     "too-many-return-statements", # TODO: solve this one.
     "too-many-statements", # TODO: solve this one.
     "too-many-branches", # TODO: solve this one.
-    "asyncio-dangling-task", # TODO: store a reference to the return value of `ensure_future`.
     "magic-value-comparison", # TODO: solve this one.
 ]
 
