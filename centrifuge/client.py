@@ -12,6 +12,7 @@ from typing import (
     Any,
     Awaitable,
     Dict,
+    Literal,
     Optional,
     Union,
     List,
@@ -94,6 +95,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("centrifuge")
 
+# The proxy argument of websockets.connect() appeared in websockets 15.0, while
+# this SDK still supports websockets 14.x - so the option is validated upfront to
+# fail with a clear message instead of a TypeError from deep inside websockets.
+_PROXY_MIN_WEBSOCKETS_VERSION = (15, 0)
+
+
+def _websockets_supports_proxy() -> bool:
+    try:
+        major, minor = (int(part) for part in websockets.__version__.split(".")[:2])
+    except ValueError:
+        # Unexpected version format (development build?) - assume support and let
+        # websockets complain if the option is not there.
+        return True
+    return (major, minor) >= _PROXY_MIN_WEBSOCKETS_VERSION
+
 
 class ClientState(Enum):
     """ClientState represents possible states of Client connection."""
@@ -155,6 +171,7 @@ class Client:
         headers: Optional[Dict[str, str]] = None,
         loop: Optional["AbstractEventLoop"] = None,
         ssl_context: Optional[ssl.SSLContext] = None,
+        proxy: Union[str, Literal[True], None] = True,
     ):
         """Initializes new Client instance.
 
@@ -169,9 +186,22 @@ class Client:
         custom CA or (not recommended in production) to skip certificate
         verification. When not set, a default TLS context is used. Passing it
         together with a ws:// address is an error.
+
+        proxy sets the proxy to connect through, in the form
+        "http://user:pass@host:port" ("socks5://..." also works, but requires the
+        python-socks package to be installed). By default proxy configuration is
+        taken from the environment (WS_PROXY/WSS_PROXY, HTTP_PROXY/HTTPS_PROXY,
+        honoring NO_PROXY) - pass None to always connect directly. The option
+        requires websockets >= 15.0.
         """
         if ssl_context is not None and not address.lower().startswith("wss://"):
             raise ValueError("ssl_context option is only applicable to wss:// addresses")
+
+        if proxy is not True and not _websockets_supports_proxy():
+            raise ValueError(
+                "proxy option requires websockets >= 15.0, "
+                f"installed version is {websockets.__version__}"
+            )
 
         self.state: ClientState = ClientState.DISCONNECTED
         self.events: ClientEventHandler = events or ClientEventHandler()
@@ -207,6 +237,7 @@ class Client:
         self._reconnect_timer = None
         self._headers = headers or {}
         self._ssl_context = ssl_context
+        self._proxy = proxy
         self._server_subs: Dict[str, _ServerSubscription] = {}
         # Channel compaction: numeric channel ID -> subscription, used to route
         # pushes that carry an ID instead of the string channel name. IDs are
@@ -387,6 +418,11 @@ class Client:
                 # ssl=None as "no TLS" and raises ValueError for it on a wss://
                 # address, instead of falling back to the default TLS context.
                 connect_kwargs["ssl"] = self._ssl_context
+            if self._proxy is not True:
+                # Only pass proxy when configured: True is the websockets default
+                # (take proxy from the environment) and websockets < 15.0 does not
+                # accept the argument at all.
+                connect_kwargs["proxy"] = self._proxy
 
             try:
                 self._conn = await websockets.connect(
