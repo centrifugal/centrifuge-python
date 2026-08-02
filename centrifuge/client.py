@@ -128,6 +128,23 @@ def _redact_proxy(proxy: str) -> str:
     return f"{scheme}{separator}***@{hostinfo}"
 
 
+def _load_parse_proxy() -> Optional[Callable[[str], Any]]:
+    """Return the proxy URL parser of websockets, or None if it can not be found.
+
+    The helper appeared in websockets 15.0 as websockets.uri.parse_proxy and moved
+    to websockets.proxy in websockets 16.0 - both layouts are supported here.
+    """
+    for module_name in ("websockets.proxy", "websockets.uri"):
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:  # pragma: no cover - all these modules exist.
+            continue
+        parse_proxy = getattr(module, "parse_proxy", None)
+        if parse_proxy is not None:
+            return parse_proxy
+    return None
+
+
 def _validate_proxy(proxy: Union[str, Literal[True], None]) -> None:
     """Validate the proxy option in the constructor, raising ValueError if it can't work.
 
@@ -148,14 +165,11 @@ def _validate_proxy(proxy: Union[str, Literal[True], None]) -> None:
 
     if not _websockets_supports_proxy():
         raise ValueError(
-            "proxy URL requires websockets >= 15.0, "
-            f"installed version is {websockets.__version__}"
+            f"proxy URL requires websockets >= 15.0, installed version is {websockets.__version__}"
         )
 
-    try:
-        # Only available since websockets 15.0, hence the local import.
-        from websockets.uri import parse_proxy  # noqa: PLC0415
-    except ImportError:  # pragma: no cover - in case websockets moves the helper.
+    parse_proxy = _load_parse_proxy()
+    if parse_proxy is None:  # pragma: no cover - in case websockets moves it again.
         return
 
     try:

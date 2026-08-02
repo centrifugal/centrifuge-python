@@ -352,6 +352,13 @@ class TestProxyValidation(unittest.IsolatedAsyncioTestCase):
             Client(self.address, proxy="socks5://localhost:1080")
 
     @requires_proxy_support
+    async def test_proxy_url_parser_is_found(self):
+        # websockets moved parse_proxy from websockets.uri to websockets.proxy in
+        # 16.0. If it moves again, validation below silently turns into a no-op -
+        # the other tests here would catch that, but only indirectly.
+        self.assertIsNotNone(centrifuge.client._load_parse_proxy())
+
+    @requires_proxy_support
     async def test_validation_error_does_not_leak_credentials(self):
         # Constructor errors end up in logs and error trackers, so the proxy URL
         # must not be echoed back with its credentials in place.
