@@ -90,7 +90,7 @@ SOCKS proxies (`socks5://...`) are supported too, but require the [python-socks]
 pip install python-socks
 ```
 
-Proxy support in `websockets` appeared in version 15.0 – with older versions the client always connects directly, ignoring both the `proxy` option and the environment configuration. Setting a proxy URL there raises `ValueError` from the `Client` constructor, so that the option does not silently do nothing. Invalid proxy URLs and a missing `python-socks` package are reported the same way.
+Invalid proxy URLs and a missing `python-socks` package are reported as `ValueError` from the `Client` constructor, rather than in the middle of connecting.
 
 A couple of things to keep in mind when going through a proxy:
 
@@ -103,33 +103,16 @@ Event callbacks are called by SDK using `await` internally, the websocket connec
 
 The fact WebSocket read is blocked for the time we execute callbacks means that you can not call awaitable SDK APIs from callback – because SDK does not have a chance to read the reply. You will get `OperationTimeoutError` exception. The rule is the same - do the work asynchronously, for example use `asyncio.ensure_future`.
 
+## Callbacks should not raise
+
+Callbacks are awaited as part of the SDK's own flow, and exceptions escaping them are not caught. Handle errors inside the callback – especially in `on_error`, which is often the place where something is reported to an external service: an exception raised there escapes while the SDK is handling a failed connection, and the client can be left in `connecting` state with no reconnect scheduled. The SDK logs such an exception through its `centrifuge` logger, and that log is the only sign of it – so keep an eye on error logs.
+
 ## Run example
 
-To run [example](https://github.com/centrifugal/centrifuge-python/blob/master/example.py), first start Centrifugo with config like this:
+To run [example](https://github.com/centrifugal/centrifuge-python/blob/master/example.py), first start Centrifugo – the [docker-compose.yml](https://github.com/centrifugal/centrifuge-python/blob/master/docker-compose.yml) of this repo configures everything the example needs (it's the same server the tests use):
 
-```json
-{
-  "client": {
-    "token": {
-      "hmac_secret_key": "secret"
-    }
-  },
-  "channel": {
-    "namespaces": [
-      {
-        "name": "example",
-        "presence": true,
-        "history_size": 300,
-        "history_ttl": "300s",
-        "join_leave": true,
-        "force_push_join_leave": true,
-        "allow_publish_for_subscriber": true,
-        "allow_presence_for_subscriber": true,
-        "allow_history_for_subscriber": true
-      }
-    ]
-  }
-}
+```bash
+docker compose up
 ```
 
 And then:

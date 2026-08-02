@@ -181,9 +181,9 @@ class Writer:
 def checksum(arr):
     sum0 = sum1 = sum2 = sum3 = 0
     z = 0
-    _n = len(arr)
+    n = len(arr)
     # Unrolling the loop for performance
-    while _n >= 16:
+    while n >= 16:
         sum0 = (sum0 + arr[z + 0]) & 0xFFFFFFFF
         sum1 = (sum1 + arr[z + 1]) & 0xFFFFFFFF
         sum2 = (sum2 + arr[z + 2]) & 0xFFFFFFFF
@@ -205,34 +205,34 @@ def checksum(arr):
         sum3 = (sum3 + arr[z + 15]) & 0xFFFFFFFF
 
         z += 16
-        _n -= 16
+        n -= 16
 
-    while _n >= 4:
+    while n >= 4:
         sum0 = (sum0 + arr[z + 0]) & 0xFFFFFFFF
         sum1 = (sum1 + arr[z + 1]) & 0xFFFFFFFF
         sum2 = (sum2 + arr[z + 2]) & 0xFFFFFFFF
         sum3 = (sum3 + arr[z + 3]) & 0xFFFFFFFF
         z += 4
-        _n -= 4
+        n -= 4
 
     sum3 = (sum3 + (sum2 << 8) + (sum1 << 16) + (sum0 << 24)) & 0xFFFFFFFF
 
     # Handle remaining bytes
-    if _n == 3:
+    if n == 3:
         sum3 = (sum3 + (arr[z + 2] << 8)) & 0xFFFFFFFF
         sum3 = (sum3 + (arr[z + 1] << 16)) & 0xFFFFFFFF
         sum3 = (sum3 + (arr[z + 0] << 24)) & 0xFFFFFFFF
-    elif _n == 2:
+    elif n == 2:
         sum3 = (sum3 + (arr[z + 1] << 16)) & 0xFFFFFFFF
         sum3 = (sum3 + (arr[z + 0] << 24)) & 0xFFFFFFFF
-    elif _n == 1:
+    elif n == 1:
         sum3 = (sum3 + (arr[z + 0] << 24)) & 0xFFFFFFFF
 
     return sum3 & 0xFFFFFFFF  # Ensure unsigned 32-bit integer
 
 
 # Apply a delta byte array to a source byte array, returning the target byte array.
-def apply_delta(source, delta):  # noqa: PLR0912
+def apply_delta(source, delta):
     total = 0
     z_delta = Reader(delta)
     len_src = len(source)

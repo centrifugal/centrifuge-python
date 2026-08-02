@@ -9,22 +9,60 @@ jobs:
 
     strategy:
       matrix:
-        os:
-          - ubuntu-latest
-        python-version:
-          - "3.9"
-          - "3.10"
-          - "3.11"
-          - "3.12"
-          - "3.13"
-        protobuf-version:
-          - "4.23.4"
-          - "5.29.3"
-          - "6.31.0"
-        websockets-version:
-          # Lowest supported version (see pyproject.toml) and the latest one.
-          - "14.1"
-          - "15.0"
+        # Every combination is listed explicitly instead of building a cross
+        # product: each supported Python, each supported websockets major and
+        # each supported protobuf major is covered, without the job count
+        # exploding. The axis under test varies, the rest stays at the newest
+        # version that Python can use.
+        include:
+          # Every supported Python version.
+          - os: ubuntu-latest
+            python-version: "3.10"
+            # websockets 17.x requires Python >= 3.11.
+            websockets-version: "16.1.1"
+            protobuf-version: "7.35.1"
+          - os: ubuntu-latest
+            python-version: "3.11"
+            websockets-version: "17.0.1"
+            protobuf-version: "7.35.1"
+          - os: ubuntu-latest
+            python-version: "3.12"
+            websockets-version: "17.0.1"
+            protobuf-version: "7.35.1"
+          - os: ubuntu-latest
+            python-version: "3.13"
+            websockets-version: "17.0.1"
+            protobuf-version: "7.35.1"
+          - os: ubuntu-latest
+            python-version: "3.14"
+            websockets-version: "17.0.1"
+            protobuf-version: "7.35.1"
+
+          # Every supported websockets major (17.x is covered above).
+          - os: ubuntu-latest
+            python-version: "3.13"
+            websockets-version: "15.0"
+            protobuf-version: "7.35.1"
+          - os: ubuntu-latest
+            python-version: "3.13"
+            websockets-version: "16.1.1"
+            protobuf-version: "7.35.1"
+
+          # Every supported protobuf major (7.x is covered above).
+          - os: ubuntu-latest
+            python-version: "3.13"
+            websockets-version: "17.0.1"
+            protobuf-version: "5.29.6"
+          - os: ubuntu-latest
+            python-version: "3.13"
+            websockets-version: "17.0.1"
+            protobuf-version: "6.33.6"
+
+          # The oldest supported everything.
+          - os: ubuntu-latest
+            python-version: "3.10"
+            websockets-version: "15.0"
+            protobuf-version: "5.29.6"
 
     runs-on: ${{ matrix.os }}
 

@@ -74,6 +74,24 @@ async def test_get_subscription_token(channel) -> str:
     return generate_jwt("42", channel)
 
 
+class TestClientConstruction(unittest.TestCase):
+    """Deliberately not an async test case - there is no running loop here."""
+
+    def test_client_can_be_created_outside_running_loop(self) -> None:
+        # The common pattern is to create a Client at import time or in a sync
+        # main() and only then call asyncio.run(). Since Python 3.14 asyncio
+        # raises RuntimeError instead of implicitly creating a loop, the
+        # constructor must not need one.
+        client = Client("ws://localhost:8000/connection/websocket")
+        self.assertEqual(client.state, ClientState.DISCONNECTED)
+
+        async def use_it() -> None:
+            self.assertIs(client._loop, asyncio.get_running_loop())
+            self.assertFalse(client._connected_future.done())
+
+        asyncio.run(use_it())
+
+
 class TestClient(unittest.IsolatedAsyncioTestCase):
     async def test_client_connects_disconnects(self) -> None:
         for use_protobuf in (False, True):
@@ -1500,9 +1518,7 @@ class TestGetState(unittest.IsolatedAsyncioTestCase):
         # Publish 3 messages BEFORE subscribing (publisher must be subscribed
         # to be allowed to publish).
         publisher = self._new_client(use_protobuf=use_protobuf)
-        publisher_sub = publisher.new_subscription(
-            channel, get_token=test_get_subscription_token
-        )
+        publisher_sub = publisher.new_subscription(channel, get_token=test_get_subscription_token)
         await publisher.connect()
         await publisher_sub.subscribe()
         for i in range(1, 4):
@@ -1552,9 +1568,7 @@ class TestGetState(unittest.IsolatedAsyncioTestCase):
         channel = "get_state_channel" + uuid.uuid4().hex
 
         publisher = self._new_client()
-        publisher_sub = publisher.new_subscription(
-            channel, get_token=test_get_subscription_token
-        )
+        publisher_sub = publisher.new_subscription(channel, get_token=test_get_subscription_token)
         await publisher.connect()
         await publisher_sub.subscribe()
 
@@ -1700,9 +1714,7 @@ class TestGetState(unittest.IsolatedAsyncioTestCase):
         # Publisher stays subscribed: used both to publish and to read the
         # current stream top position via history (as the app's backend would).
         publisher = self._new_client()
-        publisher_sub = publisher.new_subscription(
-            channel, get_token=test_get_subscription_token
-        )
+        publisher_sub = publisher.new_subscription(channel, get_token=test_get_subscription_token)
         await publisher.connect()
         await publisher_sub.subscribe()
 
@@ -1759,7 +1771,6 @@ class TestGetState(unittest.IsolatedAsyncioTestCase):
 
         await client.disconnect()
         await publisher.disconnect()
-
 
 
 class TestChannelCompaction(unittest.IsolatedAsyncioTestCase):
