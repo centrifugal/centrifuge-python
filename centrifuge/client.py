@@ -286,10 +286,10 @@ class Client:
         self._max_server_ping_delay: float = max_server_ping_delay
         self._ping_timer = None
         self._refresh_timer = None
-        self._connected_future = asyncio.Future()
+        self.__connected_future: Optional[asyncio.Future] = None
         self._token = token
         self._get_token = get_token
-        self._loop = loop or asyncio.get_event_loop()
+        self._explicit_loop = loop
         self._inflight_commands: Dict[int, _Callback] = {}
         self._reconnect_attempts = 0
         self._reconnect_timer = None
@@ -307,6 +307,30 @@ class Client:
         self._listen_task: Optional[asyncio.Task] = None
         self._process_messages_task: Optional[asyncio.Task] = None
         self._disconnecting = False
+
+    @property
+    def _connected_future(self) -> asyncio.Future:
+        # Created on first use for the same reason as the loop above:
+        # asyncio.Future() binds to the current loop, which does not exist yet
+        # when the Client is constructed outside of asyncio.run().
+        if self.__connected_future is None:
+            self.__connected_future = asyncio.Future()
+        return self.__connected_future
+
+    @_connected_future.setter
+    def _connected_future(self, future: asyncio.Future) -> None:
+        self.__connected_future = future
+
+    @property
+    def _loop(self) -> "AbstractEventLoop":
+        # The loop is resolved on first use instead of in the constructor: since
+        # Python 3.14 asyncio.get_event_loop() raises RuntimeError when there is
+        # no running loop, and a Client is usually created before asyncio.run()
+        # starts one. Every use happens inside a running loop, so by then it is
+        # available - and it is remembered to keep the client bound to one loop.
+        if self._explicit_loop is None:
+            self._explicit_loop = asyncio.get_running_loop()
+        return self._explicit_loop
 
     def subscriptions(self) -> Dict[str, "Subscription"]:
         """Returns a copy of subscriptions dict."""
@@ -1516,7 +1540,7 @@ class Client:
     ) -> None:
         if self._conn is None:
             raise CentrifugeError("connection is not initialized")
-        logger.debug("send commands: %s", str(commands))
+        logger.debug("send commands: %s", commands)
         commands = self._codec.encode_commands(commands)
         try:
             await self._conn.send(commands)
@@ -1560,7 +1584,7 @@ class Client:
         if reply.get("id", 0) > 0:
             await self._future_success(reply["id"], reply)
         elif reply.get("push"):
-            logger.debug("received push reply %s", str(reply))
+            logger.debug("received push reply %s", reply)
             push = reply["push"]
             # Channel compaction: pub/join/leave pushes may carry a numeric channel
             # ID instead of the channel name. Other push types always carry the
@@ -1577,7 +1601,7 @@ class Client:
             elif "disconnect" in push:
                 await self._process_disconnect(push["disconnect"])
             else:
-                logger.debug("skip unknown push reply %s", str(reply))
+                logger.debug("skip unknown push reply %s", reply)
         else:
             await self._handle_ping()
 
@@ -1589,9 +1613,7 @@ class Client:
             return self._subs_by_id.get(push_id)
         return self._subs.get(channel)
 
-    def _update_subscription_push_id(
-        self, sub: "Subscription", old_id: int, new_id: int
-    ) -> None:
+    def _update_subscription_push_id(self, sub: "Subscription", old_id: int, new_id: int) -> None:
         # Remove the old numeric ID mapping (only if it still points to this
         # subscription) and register the new one. Either ID may be 0 (no mapping).
         if old_id > 0 and self._subs_by_id.get(old_id) is sub:
@@ -1644,11 +1666,11 @@ class Client:
         )
 
     async def _process_incoming_data(self, message: bytes) -> None:
-        logger.debug("start parsing message: %s", str(message))
+        logger.debug("start parsing message: %s", message)
         replies = self._codec.decode_replies(message)
         logger.debug("got %d replies", len(replies))
         for reply in replies:
-            logger.debug("got reply %s", str(reply))
+            logger.debug("got reply %s", reply)
             await self._process_reply(reply)
 
     async def _process_messages(self) -> None:
@@ -1658,7 +1680,7 @@ class Client:
                 message = await self._messages.get()
                 if message is None:
                     break
-                logger.debug("start processing message: %s", str(message))
+                logger.debug("start processing message: %s", message)
                 await self._process_incoming_data(message)
         logger.debug("stop message processing routine")
 

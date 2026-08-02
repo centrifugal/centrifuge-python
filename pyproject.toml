@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "centrifuge-python"
 description = "WebSocket SDK for Centrifugo (and any Centrifuge-based server) on top of Python asyncio library"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = "MIT"
 authors = [
     { name = "Alexander Emelin (Centrifugal Labs LTD)", email = "" },
@@ -28,11 +28,11 @@ classifiers = [
     "Framework :: AsyncIO",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3 :: Only",
     "Topic :: System :: Networking",
     "Topic :: Software Development :: Libraries :: Python Modules",
@@ -44,16 +44,20 @@ dependencies = [
     # uses to turn a server close frame into a disconnect code, only appeared
     # there - on 14.0 the client raises AttributeError on close and reconnects
     # in a loop instead of handling terminal disconnect codes.
-    "websockets>=14.1,<16.0.0",
-    "protobuf>=4.23.4,<7.0.0",
+    "websockets>=14.1,<18.0.0",
+    # On Python 3.14 the floor is protobuf 5.27.0: importing generated code with
+    # an older runtime there fails with "Metaclasses with custom tp_new are not
+    # supported". Older Pythons keep working with the whole supported range.
+    "protobuf>=4.23.4,<8.0.0; python_version < '3.14'",
+    "protobuf>=5.27.0,<8.0.0; python_version >= '3.14'",
 ]
 
 dynamic = ["version"]
 
 [project.optional-dependencies]
 dev = [
-    "ruff~=0.1.4",
-    "pre-commit~=3.5.0",
+    "ruff~=0.16.1",
+    "pre-commit~=4.6",
 ]
 # Tooling for `make proto`, kept out of dev: grpcio-tools 1.62.x requires
 # protobuf<5 and would downgrade the protobuf runtime when installed — dev
@@ -71,13 +75,13 @@ post-install-commands = ["pre-commit install"]
 
 [tool.hatch.envs.default.scripts]
 reformat = "ruff format ."
-lint = "ruff . --fix"
+lint = "ruff check . --fix"
 
 [tool.hatch.build.targets.wheel]
 packages = ["centrifuge"]
 
 [[tool.hatch.envs.test.matrix]]
-python = ["38", "39", "310", "311", "312"]
+python = ["310", "311", "312", "313", "314"]
 
 [tool.hatch.version]
 path = "centrifuge/__meta__.py"
@@ -85,6 +89,17 @@ path = "centrifuge/__meta__.py"
 [tool.ruff]
 preview = true
 line-length = 99
+exclude = [
+    "centrifuge/protocol/client_pb2.py",
+    "tests/data/5/delta",
+    "tests/data/5/target",
+    "tests/data/5/origin",
+    "tests/data/4/delta",
+    "tests/data/3/delta",
+    "tests/data/1/delta",
+]
+
+[tool.ruff.lint]
 select = [
     "PL", # pylint
     "F", # pyflakes
@@ -96,7 +111,7 @@ select = [
     "S", # flake8-bandit
     "B", # flake8-bugbear
     "A", # flake8-builtins
-    "C40", # flake8-comprehensions
+    "C4", # flake8-comprehensions
     "T10", # flake8-debugger
     "EXE", # flake8-executable
     "ICN", # flake8-import-conventions
@@ -106,38 +121,35 @@ select = [
     "PT", # flake8-pytest-style
     "SIM", # flake8-simplify
     "TID", # flake8-tidy-imports
-    "TCH", # flake8-type-checking
+    "TC", # flake8-type-checking
     "ARG", # flake8-unused-arguments
     "PGH", # pygrep-hooks
     "RSE", # flake8-raise
     "RUF", # ruff
 ]
 ignore = [
-    "PLR0913", # Aligns with other SDKs.
-    "C901", # TODO: solve this one, too complex functions
-    "PLR0911", # TODO: solve this one, too many return statements
-    "PLR0915", # TODO, solve this one, too many statements
-    "RUF006", # TODO: solve this one, store a reference to the return value of `ensure_future`
-    "PLR2004", # TODO: solve this one, magic value
-    "PLR0917", # Aligns with other SDKs.
-]
-exclude = [
-    "centrifuge/protocol/client_pb2.py",
-    "tests/data/5/delta",
-    "tests/data/5/target",
-    "tests/data/5/origin",
-    "tests/data/4/delta",
-    "tests/data/3/delta",
-    "tests/data/1/delta",
+    # Ruff's preview suppression syntax (`# ruff: ignore[rule-name]`) is not used
+    # here - plain `# noqa` comments are understood by every other tool as well.
+    "noqa-comments",
+    "too-many-arguments", # Aligns with other SDKs.
+    "too-many-positional-arguments", # Aligns with other SDKs.
+    "complex-structure", # TODO: solve this one.
+    "too-many-return-statements", # TODO: solve this one.
+    "too-many-statements", # TODO: solve this one.
+    "too-many-branches", # TODO: solve this one.
+    "asyncio-dangling-task", # TODO: store a reference to the return value of `ensure_future`.
+    "magic-value-comparison", # TODO: solve this one.
 ]
 
-
-[tool.ruff.per-file-ignores]
+[tool.ruff.lint.per-file-ignores]
 "tests/**.py" = [
-    "PT009", # Use a regular `assert` instead of unittest-style `assertTrue`
-    "S101", # Use of assert detected
+    "pytest-unittest-assertion", # unittest-style assertions are the style here.
+    "assert",
+    "unused-async", # Event handlers must be async even when they do not await.
+    "too-many-statements-in-try-clause",
 ]
 "example.py" = [
-    "S105", # Yes, token is hard-coded in the example.
-    "PLR6301", # Seems fine for the example.
+    "hardcoded-password-string", # Yes, token is hard-coded in the example.
+    "no-self-use", # Seems fine for the example.
+    "unused-async", # Token callbacks are awaited by the SDK, they must be async.
 ]

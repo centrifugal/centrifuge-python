@@ -24,10 +24,10 @@ test:
 	python -m unittest discover -s tests
 
 lint:
-	ruff .
+	ruff check .
 
 lint-fix:
-	ruff . --fix
+	ruff check . --fix
 
 lint-ci:
-	ruff . --output-format=github
+	ruff check . --output-format=github

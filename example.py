@@ -123,7 +123,7 @@ class SubscriptionEventLoggerHandler(SubscriptionEventHandler):
         logging.error("subscription error: %s", ctx)
 
 
-def run_example():
+async def run_example():
     client = Client(
         "ws://localhost:8000/connection/websocket",
         events=ClientEventLoggerHandler(),
@@ -139,66 +139,53 @@ def run_example():
         # and other options here.
     )
 
-    async def run():
-        await client.connect()
-        await sub.subscribe()
-
-        try:
-            # Note that in Protobuf case we need to encode payloads to bytes:
-            # result = await sub.publish(data=json.dumps({"input": "test"}).encode())
-            # But in JSON protocol case we can just pass dict which will be encoded to
-            # JSON automatically.
-            await sub.publish(data={"input": "test"})
-        except CentrifugeError as e:
-            logging.error("error publish: %s", e)
-
-        try:
-            result = await sub.presence_stats()
-            logging.info(result)
-        except CentrifugeError as e:
-            logging.error("error presence stats: %s", e)
-
-        try:
-            result = await sub.presence()
-            logging.info(result)
-        except CentrifugeError as e:
-            logging.error("error presence: %s", e)
-
-        try:
-            result = await sub.history(limit=1, reverse=True)
-            logging.info(result)
-        except CentrifugeError as e:
-            logging.error("error history: %s", e)
-
-        logging.info("all done, client connection is still alive, press Ctrl+C to exit")
-
-    asyncio.ensure_future(run())
-    loop = asyncio.get_event_loop()
-
-    async def shutdown(received_signal):
-        logging.info("received exit signal %s...", received_signal.name)
-        await client.disconnect()
-
-        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-        for task in tasks:
-            task.cancel()
-
-        logging.info("Cancelling outstanding tasks")
-        await asyncio.gather(*tasks, return_exceptions=True)
-        loop.stop()
-
-    signals = (signal.SIGTERM, signal.SIGINT)
-    for s in signals:
-        loop.add_signal_handler(
-            s, lambda received_signal=s: asyncio.create_task(shutdown(received_signal))
-        )
+    await client.connect()
+    await sub.subscribe()
 
     try:
-        loop.run_forever()
-    finally:
-        loop.close()
-        logging.info("successfully completed service shutdown")
+        # Note that in Protobuf case we need to encode payloads to bytes:
+        # result = await sub.publish(data=json.dumps({"input": "test"}).encode())
+        # But in JSON protocol case we can just pass dict which will be encoded to
+        # JSON automatically.
+        await sub.publish(data={"input": "test"})
+    except CentrifugeError as e:
+        logging.error("error publish: %s", e)
+
+    try:
+        result = await sub.presence_stats()
+        logging.info(result)
+    except CentrifugeError as e:
+        logging.error("error presence stats: %s", e)
+
+    try:
+        result = await sub.presence()
+        logging.info(result)
+    except CentrifugeError as e:
+        logging.error("error presence: %s", e)
+
+    try:
+        result = await sub.history(limit=1, reverse=True)
+        logging.info(result)
+    except CentrifugeError as e:
+        logging.error("error history: %s", e)
+
+    logging.info("all done, client connection is still alive, press Ctrl+C to exit")
+
+    # Keep the connection alive until a termination signal arrives.
+    stop = asyncio.Event()
+
+    def on_signal(received_signal):
+        logging.info("received exit signal %s...", received_signal.name)
+        stop.set()
+
+    loop = asyncio.get_running_loop()
+    for received_signal in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(received_signal, on_signal, received_signal)
+    await stop.wait()
+
+    await client.disconnect()
+    logging.info("successfully completed service shutdown")
 
 
 if __name__ == "__main__":
-    run_example()
+    asyncio.run(run_example())

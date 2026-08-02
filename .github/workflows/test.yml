@@ -12,19 +12,50 @@ jobs:
         os:
           - ubuntu-latest
         python-version:
-          - "3.9"
+          # Lowest supported version (see pyproject.toml) up to the latest one.
           - "3.10"
           - "3.11"
           - "3.12"
           - "3.13"
+          - "3.14"
         protobuf-version:
+          # Lowest supported version, one of each major in between, latest one.
           - "4.23.4"
           - "5.29.3"
           - "6.31.0"
+          - "7.35.1"
         websockets-version:
           # Lowest supported version (see pyproject.toml) and the latest one.
           - "14.1"
-          - "15.0"
+          - "17.0.1"
+        exclude:
+          # websockets 17.x requires Python >= 3.11.
+          - python-version: "3.10"
+            websockets-version: "17.0.1"
+          # protobuf < 5.27.0 can not import generated code on Python 3.14 (see
+          # the dependency markers in pyproject.toml).
+          - python-version: "3.14"
+            protobuf-version: "4.23.4"
+        include:
+          # ... so on 3.10 the newest supported websockets is 16.x. Note that os
+          # must be set here too - an include entry which does not match any
+          # existing combination creates a new one, with unset keys left empty.
+          - os: ubuntu-latest
+            python-version: "3.10"
+            websockets-version: "16.1.1"
+            protobuf-version: "4.23.4"
+          - os: ubuntu-latest
+            python-version: "3.10"
+            websockets-version: "16.1.1"
+            protobuf-version: "5.29.3"
+          - os: ubuntu-latest
+            python-version: "3.10"
+            websockets-version: "16.1.1"
+            protobuf-version: "6.31.0"
+          - os: ubuntu-latest
+            python-version: "3.10"
+            websockets-version: "16.1.1"
+            protobuf-version: "7.35.1"
 
     runs-on: ${{ matrix.os }}
 

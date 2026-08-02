@@ -23,9 +23,7 @@ class TestSubRefreshWire(unittest.IsolatedAsyncioTestCase):
     async def test_sub_refresh_includes_channel(self):
         # Subscribe reply advertises a short-lived token so the client schedules
         # a sub_refresh almost immediately.
-        self.server.on_subscribe = lambda _ch, _req: protocol.SubscribeResult(
-            expires=True, ttl=1
-        )
+        self.server.on_subscribe = lambda _ch, _req: protocol.SubscribeResult(expires=True, ttl=1)
 
         sub_refresh_cmd = asyncio.Future()
 
