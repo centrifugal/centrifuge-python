@@ -1,7 +1,11 @@
 import asyncio
 import base64
 import contextlib
+import logging
 import os
+import shutil
+import ssl
+import tempfile
 import unittest
 from unittest import mock
 
@@ -10,6 +14,7 @@ import websockets
 import centrifuge.client
 from centrifuge import Client, ClientState
 from tests.fake_server import FakeCentrifugoServer
+from tests.test_ssl import _generate_cert
 
 # Tests for the proxy option (https://github.com/centrifugal/centrifuge-python/issues/45),
 # exercised against a minimal in-process HTTP proxy (CONNECT method) in front of
@@ -224,6 +229,77 @@ class TestHTTPProxyAuth(TestProxyBase):
         self.assertNotIn(b"proxy-authorization", tunneled)
         self.assertNotIn(base64.b64encode(b"user:pass").lower(), tunneled)
         self.assertNotIn(b"user:pass", tunneled)
+
+
+@requires_proxy_support
+@unittest.skipUnless(shutil.which("openssl"), "openssl is required to generate a test cert")
+class TestProxyWithTLS(unittest.IsolatedAsyncioTestCase):
+    """A proxy must not weaken TLS: the tunnel stays end to end encrypted."""
+
+    async def asyncSetUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.cert_path, key_path = _generate_cert(self._tmpdir.name)
+        server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ctx.load_cert_chain(self.cert_path, key_path)
+        self.server = FakeCentrifugoServer()
+        await self.server.start(ssl_context=server_ctx)
+        self.proxy = ConnectProxy()
+        await self.proxy.start()
+
+    async def asyncTearDown(self):
+        await self.proxy.stop()
+        await self.server.stop()
+        self._tmpdir.cleanup()
+
+    async def test_wss_through_proxy_is_opaque_to_proxy(self):
+        client_ctx = ssl.create_default_context(cafile=str(self.cert_path))
+        client = Client(
+            self.server.url, use_protobuf=True, ssl_context=client_ctx, proxy=self.proxy.url
+        )
+        await client.connect()
+        await client.ready(timeout=5)
+        self.assertEqual(client.state, ClientState.CONNECTED)
+        self.assertEqual(self.proxy.connect_targets, [f"localhost:{self.server.port}"])
+        await client.disconnect()
+
+        # Beyond the CONNECT request the proxy only relays TLS records (the first
+        # byte of a TLS handshake record is 0x16) - the WebSocket handshake and
+        # the connection token inside it are not visible to it.
+        tunneled = b"".join(self.proxy.tunneled)
+        self.assertTrue(tunneled.startswith(b"\x16"))
+        self.assertNotIn(b"Sec-WebSocket-Key", tunneled)
+
+    async def test_certificate_still_verified_through_proxy(self):
+        # Tunneling must not silently skip verification of the server
+        # certificate: without a matching CA the self-signed certificate of the
+        # test server is rejected, exactly like on a direct connection.
+        # The aborted TLS handshake makes asyncio log a server-side traceback.
+        asyncio_logger = logging.getLogger("asyncio")
+        previous_level = asyncio_logger.level
+        asyncio_logger.setLevel(logging.CRITICAL)
+        self.addCleanup(asyncio_logger.setLevel, previous_level)
+
+        error = asyncio.Future()
+
+        async def on_error(ctx):
+            if not error.done():
+                error.set_result(ctx)
+
+        client = Client(
+            self.server.url,
+            use_protobuf=True,
+            proxy=self.proxy.url,
+            # Keep the retry far away so a single attempt is observed.
+            min_reconnect_delay=30,
+            max_reconnect_delay=30,
+        )
+        client.events.on_error = on_error
+        await client.connect()
+        ctx = await asyncio.wait_for(error, timeout=5)
+        self.assertIsInstance(ctx.error, ssl.SSLCertVerificationError)
+        self.assertEqual(client.state, ClientState.CONNECTING)
+        self.assertEqual(self.proxy.connect_targets, [f"localhost:{self.server.port}"])
+        await client.disconnect()
 
 
 class TestProxyValidation(unittest.IsolatedAsyncioTestCase):
