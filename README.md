@@ -90,7 +90,12 @@ SOCKS proxies (`socks5://...`) are supported too, but require the [python-socks]
 pip install python-socks
 ```
 
-Note that the `proxy` option requires `websockets` >= 15.0 – passing it with an older version raises `ValueError`.
+Proxy support in `websockets` appeared in version 15.0 – with older versions the client always connects directly, ignoring both the `proxy` option and the environment configuration. Setting a proxy URL there raises `ValueError` from the `Client` constructor, so that the option does not silently do nothing. Invalid proxy URLs and a missing `python-socks` package are reported the same way.
+
+A couple of things to keep in mind when going through a proxy:
+
+* with a `wss://` address the proxy only sees the `CONNECT host:port` request – the WebSocket traffic inside the tunnel stays encrypted end to end, and the server certificate is still verified as usual. With a `ws://` address the proxy sees everything, including the connection token.
+* credentials in an `http://` proxy URL are sent to the proxy as a base64-encoded `Proxy-Authorization` header over an unencrypted connection. They are never forwarded to the Centrifugo server, but use an `https://` proxy if the proxy connection itself may be observed.
 
 ## Callbacks should not block
 
