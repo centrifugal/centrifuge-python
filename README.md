@@ -105,31 +105,10 @@ The fact WebSocket read is blocked for the time we execute callbacks means that 
 
 ## Run example
 
-To run [example](https://github.com/centrifugal/centrifuge-python/blob/master/example.py), first start Centrifugo with config like this:
+To run [example](https://github.com/centrifugal/centrifuge-python/blob/master/example.py), first start Centrifugo – the [docker-compose.yml](https://github.com/centrifugal/centrifuge-python/blob/master/docker-compose.yml) of this repo configures everything the example needs (it's the same server the tests use):
 
-```json
-{
-  "client": {
-    "token": {
-      "hmac_secret_key": "secret"
-    }
-  },
-  "channel": {
-    "namespaces": [
-      {
-        "name": "example",
-        "presence": true,
-        "history_size": 300,
-        "history_ttl": "300s",
-        "join_leave": true,
-        "force_push_join_leave": true,
-        "allow_publish_for_subscriber": true,
-        "allow_presence_for_subscriber": true,
-        "allow_history_for_subscriber": true
-      }
-    ]
-  }
-}
+```bash
+docker compose up
 ```
 
 And then:
