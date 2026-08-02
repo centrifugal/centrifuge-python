@@ -52,10 +52,6 @@ jobs:
           - os: ubuntu-latest
             python-version: "3.13"
             websockets-version: "17.0.1"
-            protobuf-version: "4.25.9"
-          - os: ubuntu-latest
-            python-version: "3.13"
-            websockets-version: "17.0.1"
             protobuf-version: "5.29.6"
           - os: ubuntu-latest
             python-version: "3.13"
@@ -66,7 +62,7 @@ jobs:
           - os: ubuntu-latest
             python-version: "3.10"
             websockets-version: "15.0"
-            protobuf-version: "4.25.9"
+            protobuf-version: "5.29.6"
 
     runs-on: ${{ matrix.os }}
 

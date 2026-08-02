@@ -45,13 +45,14 @@ dependencies = [
     # 14.1 was the previous floor for Connection.close_code / close_reason, which
     # the client uses to turn a server close frame into a disconnect code.
     "websockets>=15.0,<18.0.0",
-    # protobuf floors are set by security fixes: 4.25.9 and 5.29.6 are the oldest
-    # releases of their lines without GHSA-8qvm-5x2c-j2w7 (DoS while parsing) and
-    # GHSA-7gcm-g887-7qv7 (JSON recursion depth bypass). On Python 3.14 the 4.x
-    # line can not be used at all - importing generated code there fails with
-    # "Metaclasses with custom tp_new are not supported" before protobuf 5.27.0.
-    "protobuf>=4.25.9,<8.0.0; python_version < '3.14'",
-    "protobuf>=5.29.6,<8.0.0; python_version >= '3.14'",
+    # The protobuf 4.x line is out of support since March 2025, and it can not be
+    # used on Python 3.14 at all. 5.29.6 is the oldest release of the 5.x line
+    # without GHSA-8qvm-5x2c-j2w7 (DoS while parsing, which is this SDK's own
+    # decode path) and GHSA-7gcm-g887-7qv7 (JSON recursion depth bypass). The 5.x
+    # line is kept, even though it is out of support too, because packages which
+    # cap protobuf below 6 are still common and the SDK has to install next to
+    # them.
+    "protobuf>=5.29.6,<8.0.0",
 ]
 
 dynamic = ["version"]
@@ -61,15 +62,15 @@ dev = [
     "ruff~=0.16.1",
     "pre-commit~=4.6",
 ]
-# Tooling for `make proto`, kept out of dev: grpcio-tools 1.62.x requires
-# protobuf<5 and would downgrade the protobuf runtime when installed — dev
-# environments and the CI protobuf version matrix must not be affected by it.
-# The 1.62.x pin is not just staleness: newer protoc emits gencode which refuses
-# to load on older protobuf runtimes, and this one is the newest whose output
-# works with every runtime the dependencies above allow. See the Makefile for
-# the compatibility table and https://github.com/centrifugal/centrifuge-python/issues/29.
+# Tooling for `make proto`, kept out of dev: grpcio-tools pins protobuf<6 and
+# would downgrade the protobuf runtime when installed — dev environments and the
+# CI protobuf version matrix must not be affected by it. The 1.71.x pin is not
+# staleness: newer protoc emits gencode which refuses to load on older protobuf
+# runtimes, and this is the newest whose output works with every runtime the
+# dependencies above allow. See the Makefile for the compatibility table and
+# https://github.com/centrifugal/centrifuge-python/issues/29.
 proto = [
-    "grpcio-tools~=1.62.3",
+    "grpcio-tools~=1.71.0",
 ]
 
 [tool.hatch.envs.default]
