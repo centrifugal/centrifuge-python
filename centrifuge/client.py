@@ -205,9 +205,6 @@ class DeltaType(Enum):
 class Client:
     """Client is a websocket client to Centrifuge/Centrifugo server."""
 
-    _reconnect_backoff_factor = 2
-    _reconnect_backoff_jitter = 0.5
-
     def __init__(
         self,
         address: str,
@@ -1766,9 +1763,6 @@ class Subscription:
     See more details about subscription behaviour in
     https://centrifugal.dev/docs/transports/client_api.
     """
-
-    _resubscribe_backoff_factor = 2
-    _resubscribe_backoff_jitter = 0.5
 
     def __init__(self) -> None:
         # Some definitions required to make PyCharm linting happy.
