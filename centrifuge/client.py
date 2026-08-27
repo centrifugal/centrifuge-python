@@ -882,11 +882,10 @@ class Client:
             handler = sub.events.on_error
             await handler(
                 SubscriptionErrorContext(
-                    code=_code_number(_ErrorCode.SUBSCRIPTION_SUBSCRIBE_TOKEN),
+                    code=_code_number(_ErrorCode.SUBSCRIPTION_REFRESH_TOKEN),
                     error=e,
                 ),
             )
-            self._spawn(sub._schedule_resubscribe())
             return
 
         cmd_id = self._next_command_id()
