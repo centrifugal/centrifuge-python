@@ -1276,7 +1276,7 @@ class Client:
             raise ReplyError(error["code"], error["message"], error.get("temporary", False))
 
     def _check_state(self):
-        if self.state != ClientState.CONNECTED:
+        if self.state == ClientState.DISCONNECTED:
             raise ClientDisconnectedError("client disconnected")
 
     async def ready(self, timeout: Optional[float] = None) -> None:
