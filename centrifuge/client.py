@@ -1483,7 +1483,9 @@ class Client:
 
         transition_from_connected = self.state == ClientState.CONNECTED
 
-        await self._messages.put(None)
+        # _process_messages_task is already cancelled and awaited above, so nothing
+        # reads from this queue anymore - replace it (instead of just leaving it) to
+        # drop any messages received but not yet processed on the old connection.
         self._messages = asyncio.Queue()
 
         if not reconnect:
