@@ -1685,13 +1685,9 @@ class Client:
     async def _process_messages(self) -> None:
         logger.debug("start message processing routine")
         while True:
-            if self._messages:
-                message = await self._messages.get()
-                if message is None:
-                    break
-                logger.debug("start processing message: %s", message)
-                await self._process_incoming_data(message)
-        logger.debug("stop message processing routine")
+            message = await self._messages.get()
+            logger.debug("start processing message: %s", message)
+            await self._process_incoming_data(message)
 
     async def _listen(self) -> None:
         logger.debug("start reading connection")
