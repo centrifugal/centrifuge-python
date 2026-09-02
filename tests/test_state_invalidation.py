@@ -183,10 +183,10 @@ class TestStateInvalidationWire(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(connected, timeout=5)
 
         server_sub = client._server_subs["ch"]
-        # Offset arrives as "5" (a string), not 5: protobuf's default JSON
-        # mapping renders int64 fields as strings, and _process_server_subs()
-        # stores the decoded value as-is without casting to int.
-        self.assertEqual(server_sub.offset, "5")
+        # Offset arrives as "5" (a string): protobuf's default JSON mapping
+        # renders int64 fields as strings. _process_server_subs() must cast it
+        # to int, matching the type of every other stored/emitted offset.
+        self.assertEqual(server_sub.offset, 5)
         self.assertEqual(server_sub.epoch, "e1")
         self.assertTrue(server_sub.recoverable)
 
