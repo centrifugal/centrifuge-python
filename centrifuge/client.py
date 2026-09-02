@@ -707,7 +707,7 @@ class Client:
         logger.debug("process server subs: %s", subs)
         for channel, subscribe in subs.items():
             self._server_subs[channel] = _ServerSubscription(
-                offset=subscribe.get("offset", 0),
+                offset=int(subscribe.get("offset", 0)),
                 epoch=subscribe.get("epoch", ""),
                 recoverable=subscribe.get("recoverable", False),
             )
