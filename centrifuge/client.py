@@ -1455,6 +1455,14 @@ class Client:
         self._token = ""
         for sub in self._subs.values():
             sub._invalidate_state()
+        for server_sub in self._server_subs.values():
+            # Reset cached recovery position to a sentinel the server can never
+            # match, mirroring _invalidate_state() above for client-side subs.
+            # Without this, _construct_connect_command() would keep sending the
+            # stale pre-invalidation offset/epoch as recovery params on every
+            # reconnect, defeating state invalidation for server-side subs.
+            server_sub.offset = 0
+            server_sub.epoch = "_"
 
     async def _do_disconnect(self, code: int, reason: str, reconnect: bool) -> None:
         if self._ping_timer:
