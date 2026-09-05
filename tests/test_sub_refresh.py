@@ -1,6 +1,8 @@
 import asyncio
 import unittest
+from unittest import mock
 
+import centrifuge.client as client_module
 from centrifuge import Client, codes
 from tests.fake_server import FakeCentrifugoServer
 
@@ -99,6 +101,52 @@ class TestSubRefreshTokenFetchError(unittest.IsolatedAsyncioTestCase):
         ctx = await asyncio.wait_for(error_ctx, timeout=5)
         self.assertEqual(ctx.code, codes._ErrorCode.SUBSCRIPTION_REFRESH_TOKEN.value)
         self.assertIsInstance(ctx.error, RuntimeError)
+
+        await client.disconnect()
+
+
+class TestSubRefreshRetry(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.server = FakeCentrifugoServer()
+        await self.server.start()
+
+    async def asyncTearDown(self):
+        await self.server.stop()
+
+    async def test_get_token_error_is_retried(self):
+        # The SDK spec promises that a failing get_token callback is retried
+        # after some jittered time. Without a retry a single transient failure
+        # leaves the subscription without refreshes until the server drops it.
+        self.server.on_subscribe = lambda _ch, _req: protocol.SubscribeResult(expires=True, ttl=1)
+
+        calls = 0
+        retried = asyncio.Event()
+
+        async def get_token(_channel):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return "initial-sub-token"
+            if calls >= 3:
+                retried.set()
+            raise RuntimeError("token service unavailable")
+
+        client = Client(self.server.url, use_protobuf=True)
+        sub = client.new_subscription("restaurant:42:in", get_token=get_token)
+
+        async def on_error(_ctx):
+            pass
+
+        sub.events.on_error = on_error
+
+        with mock.patch.multiple(
+            client_module,
+            _SUB_REFRESH_RETRY_MIN_DELAY=0.05,
+            _SUB_REFRESH_RETRY_MAX_DELAY=0.1,
+        ):
+            await client.connect()
+            await sub.subscribe()
+            await asyncio.wait_for(retried.wait(), timeout=5)
 
         await client.disconnect()
 

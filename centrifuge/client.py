@@ -97,6 +97,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("centrifuge")
 
+# Jittered delays (in seconds) used to retry a token refresh when the app's
+# get_token callback raises. The SDK spec promises such a retry, see
+# https://centrifugal.dev/docs/transports/client_api - values match other
+# Centrifugal SDKs.
+_REFRESH_RETRY_MIN_DELAY = 5.0
+_REFRESH_RETRY_MAX_DELAY = 10.0
+_SUB_REFRESH_RETRY_MIN_DELAY = 10.0
+_SUB_REFRESH_RETRY_MAX_DELAY = 20.0
+
 
 def _python_socks_installed() -> bool:
     return importlib.util.find_spec("python_socks") is not None
@@ -819,6 +828,7 @@ class Client:
             await handler(
                 ErrorContext(code=_code_number(_ErrorCode.CLIENT_REFRESH_TOKEN), error=e),
             )
+            self._schedule_refresh_retry()
             return
 
         self._token = token
@@ -863,6 +873,24 @@ class Client:
                 lambda: self._spawn(self._refresh()),
             )
 
+    def _schedule_refresh_retry(self) -> None:
+        """Re-arm the connection token refresh after a get_token failure.
+
+        Without it a single transient get_token error would leave the connection
+        with no further refresh attempts until the server drops it as expired,
+        while the SDK spec promises a retry after some jittered time.
+        """
+        if self.state != ClientState.CONNECTED or not self._get_token:
+            return
+        if self._refresh_timer:
+            self._refresh_timer.cancel()
+        delay = _backoff(0, _REFRESH_RETRY_MIN_DELAY, _REFRESH_RETRY_MAX_DELAY)
+        logger.debug("retry connection token refresh in %f", delay)
+        self._refresh_timer = self._loop.call_later(
+            delay,
+            lambda: self._spawn(self._refresh()),
+        )
+
     async def _sub_refresh(self, channel: str):
         sub = self._subs.get(channel)
         if not sub:
@@ -886,6 +914,7 @@ class Client:
                     error=e,
                 ),
             )
+            self._schedule_sub_refresh_retry(sub)
             return
 
         cmd_id = self._next_command_id()
@@ -935,6 +964,22 @@ class Client:
                 ttl,
                 lambda: self._spawn(sub._refresh()),
             )
+
+    def _schedule_sub_refresh_retry(self, sub: "Subscription") -> None:
+        """Re-arm the subscription token refresh after a get_token failure.
+
+        The subscription counterpart of _schedule_refresh_retry above.
+        """
+        if sub.state != SubscriptionState.SUBSCRIBED or not sub._get_token:
+            return
+        if sub._refresh_timer:
+            sub._refresh_timer.cancel()
+        delay = _backoff(0, _SUB_REFRESH_RETRY_MIN_DELAY, _SUB_REFRESH_RETRY_MAX_DELAY)
+        logger.debug("retry subscription token refresh for %s in %f", sub.channel, delay)
+        sub._refresh_timer = self._loop.call_later(
+            delay,
+            lambda: self._spawn(sub._refresh()),
+        )
 
     @staticmethod
     def _extract_error_details(reply):
