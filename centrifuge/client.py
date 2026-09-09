@@ -815,7 +815,10 @@ class Client:
         await self._disconnect(_code_number(code), _code_message(code), False)
 
     async def _refresh(self) -> None:
-        cmd_id = self._next_command_id()
+        # Mirrors the guard in Subscription._refresh: a refresh only makes sense
+        # over a live connection, the next connect carries the token itself.
+        if self.state != ClientState.CONNECTED:
+            return
 
         try:
             token = await self._get_token()
@@ -832,6 +835,14 @@ class Client:
             return
 
         self._token = token
+
+        # Re-check state after async get_token(). The fetched token is kept - the
+        # next connect uses it - but sending a refresh over a connection which is
+        # already gone is pointless.
+        if self.state != ClientState.CONNECTED:
+            return
+
+        cmd_id = self._next_command_id()
         command = {
             "id": cmd_id,
             "refresh": {
@@ -848,10 +859,19 @@ class Client:
             await handler(
                 ErrorContext(code=_code_number(_ErrorCode.CLIENT_REFRESH_TOKEN), error=e),
             )
+            # The command did not reach the server (timeout, transport closed) -
+            # retry, otherwise the connection is left with no refresh scheduled.
+            self._schedule_refresh_retry()
             return
 
         if reply.get("error"):
             code, message, temporary = self._extract_error_details(reply)
+            if not temporary:
+                # Terminal error: retrying can not help, so go to the disconnected
+                # state as the SDK spec requires for terminal conditions met while
+                # connected.
+                await self._disconnect(code, message, False)
+                return
             handler = self.events.on_error
             await handler(
                 ErrorContext(
@@ -859,6 +879,7 @@ class Client:
                     error=ReplyError(code, message, temporary),
                 ),
             )
+            self._schedule_refresh_retry()
             return
 
         refresh = reply["refresh"]
@@ -874,11 +895,12 @@ class Client:
             )
 
     def _schedule_refresh_retry(self) -> None:
-        """Re-arm the connection token refresh after a get_token failure.
+        """Re-arm the connection token refresh after a temporary failure.
 
-        Without it a single transient get_token error would leave the connection
-        with no further refresh attempts until the server drops it as expired,
-        while the SDK spec promises a retry after some jittered time.
+        Without it a single transient error (a failing get_token callback, a lost
+        or timed out refresh command, a temporary server error) would leave the
+        connection with no further refresh attempts until the server drops it as
+        expired, while the SDK spec promises a retry after some jittered time.
         """
         if self.state != ClientState.CONNECTED or not self._get_token:
             return
@@ -940,10 +962,18 @@ class Client:
                     error=e,
                 ),
             )
+            # The command did not reach the server (timeout, transport closed) -
+            # retry, otherwise the subscription is left with no refresh scheduled.
+            self._schedule_sub_refresh_retry(sub)
             return
 
         if reply.get("error"):
             code, message, temporary = self._extract_error_details(reply)
+            if not temporary:
+                # Terminal error: retrying can not help, so the subscription goes
+                # to the unsubscribed state, like on a terminal subscribe error.
+                await sub._move_unsubscribed(code, message, send_unsubscribe_command=True)
+                return
             handler = sub.events.on_error
             await handler(
                 SubscriptionErrorContext(
@@ -951,6 +981,7 @@ class Client:
                     error=ReplyError(code, message, temporary),
                 ),
             )
+            self._schedule_sub_refresh_retry(sub)
             return
 
         sub_refresh = reply["sub_refresh"]
@@ -966,7 +997,7 @@ class Client:
             )
 
     def _schedule_sub_refresh_retry(self, sub: "Subscription") -> None:
-        """Re-arm the subscription token refresh after a get_token failure.
+        """Re-arm the subscription token refresh after a temporary failure.
 
         The subscription counterpart of _schedule_refresh_retry above.
         """
