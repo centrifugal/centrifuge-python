@@ -1226,6 +1226,13 @@ class Client:
         if not sub:
             return
 
+        if self.state != ClientState.CONNECTED:
+            # Server-side subscriptions do not outlive the connection, so there is
+            # nothing to unsubscribe from. Sending anyway would fail without a
+            # transport, wait for the whole timeout over a closed one, and get the
+            # client disconnected by the server before the connect reply.
+            return
+
         unsubscribe = {"channel": sub.channel}
 
         cmd_id = self._next_command_id()
@@ -1242,6 +1249,10 @@ class Client:
         except OperationTimeoutError:
             code = _ConnectingCode.UNSUBSCRIBE_ERROR
             await self._disconnect(_code_number(code), _code_message(code), True)
+            return
+        except ClientDisconnectedError:
+            # The connection was lost before the reply - the subscription is gone
+            # on the server together with it.
             return
 
     def _register_future(self, cmd_id: int, timeout: float) -> asyncio.Future:
