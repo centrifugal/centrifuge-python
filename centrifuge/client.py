@@ -1773,6 +1773,14 @@ class Client:
         logger.debug("start parsing message: %s", message)
         replies = self._codec.decode_replies(message)
         logger.debug("got %d replies", len(replies))
+        # Any data from the server shows the connection is alive, not only a
+        # ping: a busy server may skip pings while it writes other messages.
+        # centrifuge-js restarts its server ping wait the same way, on every
+        # batch of replies. Only an armed wait is restarted: _do_disconnect
+        # clears it before cancelling this task, and a frame still processed
+        # in between must not arm it again.
+        if replies and self._ping_timer is not None:
+            self._restart_ping_wait()
         for reply in replies:
             logger.debug("got reply %s", reply)
             await self._process_reply(reply)
