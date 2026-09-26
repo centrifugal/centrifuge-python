@@ -1309,24 +1309,26 @@ class Client:
                 done.set_result(True)
 
     def _future_error(self, cmd_id: int, exc: Exception):
-        cb = self._inflight_commands.get(cmd_id)
+        cb = self._inflight_commands.pop(cmd_id, None)
         if not cb:
             return
-        cb.future.set_exception(exc)
-        if cb.done:
+        # The future is already done (cancelled) when the coroutine awaiting it
+        # was cancelled, e.g. by asyncio.wait_for() - resolving it again raises.
+        if not cb.future.done():
+            cb.future.set_exception(exc)
+        if cb.done and not cb.done.done():
             cb.done.set_result(True)
         # Cancel timeout timer to prevent timer leak
         if cb.timeout:
             cb.timeout.cancel()
-        del self._inflight_commands[cmd_id]
 
     async def _future_success(self, cmd_id: int, reply):
-        cb = self._inflight_commands.get(cmd_id)
+        cb = self._inflight_commands.pop(cmd_id, None)
         if not cb:
             return
-        future = cb.future
-        future.set_result(reply)
-        del self._inflight_commands[cmd_id]
+        # See _future_error: the awaiting coroutine may have been cancelled.
+        if not cb.future.done():
+            cb.future.set_result(reply)
         if cb.timeout:
             cb.timeout.cancel()
         if cb.done:
