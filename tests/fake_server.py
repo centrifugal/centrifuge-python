@@ -11,10 +11,8 @@ Centrifugo PRO only and can't be exercised against the OSS docker-compose server
 the other suites use; and because a fake gives deterministic control of timing,
 errors and reconnects.
 
-Protobuf (not JSON) is used because the JSON client transport sends an empty
-``Sec-WebSocket-Protocol`` header that the ``websockets`` server rejects; with
-protobuf the client sends a valid ``centrifuge-protobuf`` subprotocol. Create the
-client under test with ``use_protobuf=True``.
+It speaks protobuf only, so create the client under test with
+``use_protobuf=True``.
 
 How to extend (most→least common):
   - Customize a subscribe reply:

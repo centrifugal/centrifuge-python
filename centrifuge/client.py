@@ -511,7 +511,10 @@ class Client:
             # Close existing connection if any before creating new one to prevent leaks
             await self._close_transport_conn()
 
-            subprotocols = []
+            # None, not an empty list, for JSON: websockets sends an empty
+            # Sec-WebSocket-Protocol header for [], which RFC 6455 does not
+            # allow and servers such as the websockets one reject.
+            subprotocols: Optional[List[str]] = None
             if self._use_protobuf:
                 subprotocols = ["centrifuge-protobuf"]
 
