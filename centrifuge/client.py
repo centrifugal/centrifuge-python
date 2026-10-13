@@ -16,6 +16,7 @@ from typing import (
     Literal,
     Optional,
     Set,
+    Tuple,
     Union,
     List,
     Callable,
@@ -922,11 +923,16 @@ class Client:
 
     async def _process_server_publication(self, channel: str, pub: Any):
         publication = self._publication_from_proto(pub)
+        connection = self._transport_id
         await self.events.on_publication(
             ServerPublicationContext(channel=channel, pub=publication)
         )
-        if publication.offset > 0:
-            self._server_subs[channel].offset = publication.offset
+        # A handler that finishes after its connection was lost (handlers aren't
+        # cancelled) must not move the position the next connection recovers
+        # from, possibly back.
+        server_sub = self._server_subs.get(channel)
+        if publication.offset > 0 and server_sub and self._transport_id == connection:
+            server_sub.offset = publication.offset
 
     def _clear_connecting_state(self) -> None:
         self._reconnect_attempts = 0
@@ -2287,6 +2293,11 @@ class Subscription:
         # token and state requests, subscribe replies and refresh steps check it
         # and stop when theirs is over.
         self._attempt: int = 0
+        # The publication an event handler is processing, as (session, offset):
+        # it counts as delivered when the subscription leaves the session during
+        # the handler (e.g. unsubscribe() + subscribe() from it), so the next
+        # subscribe recovers after it.
+        self._pending: Optional[Tuple[int, int]] = None
 
         if delta and delta not in {DeltaType.FOSSIL}:
             raise CentrifugeError("unsupported delta format")
@@ -2390,6 +2401,12 @@ class Subscription:
     def _session_current(self, session: int) -> bool:
         return self._attempt == session and self.state == SubscriptionState.SUBSCRIBED
 
+    def _commit_pending(self) -> None:
+        # Called when the subscribed session ends.
+        if self._pending is not None and self._pending[0] == self._attempt:
+            self._offset = self._pending[1]
+        self._pending = None
+
     def _clear_subscribed_state(self) -> None:
         if self._refresh_timer:
             logger.debug("canceling refresh timer for %s", self.channel)
@@ -2417,6 +2434,7 @@ class Subscription:
 
         if self.state == SubscriptionState.SUBSCRIBED:
             self._clear_subscribed_state()
+            self._commit_pending()
         elif self.state == SubscriptionState.SUBSCRIBING:
             self._clear_subscribing_state()
 
@@ -2459,6 +2477,7 @@ class Subscription:
 
         if self.state == SubscriptionState.SUBSCRIBED:
             self._clear_subscribed_state()
+            self._commit_pending()
 
         self.state = SubscriptionState.SUBSCRIBING
         self._attempt += 1
@@ -2536,10 +2555,11 @@ class Subscription:
 
         self._clear_subscribing_state()
 
-        # The handler may have unsubscribed (or the client disconnected): the
-        # recovered publications belong to a subscription that is over then.
+        # The handler may have unsubscribed (or the client disconnected, and the
+        # subscription maybe even subscribed again): the recovered publications
+        # belong to a subscribed session that is over then.
         for pub in subscribe.get("publications", []):
-            if self.state != SubscriptionState.SUBSCRIBED:
+            if not self._session_current(session):
                 break
             await self._process_publication(pub)
 
@@ -2580,6 +2600,7 @@ class Subscription:
     async def _process_publication(self, pub: Any) -> None:
         if self.state != SubscriptionState.SUBSCRIBED:
             return
+        session = self._attempt
         publication = self._client._publication_from_proto(pub)
 
         if self._delta and self._delta_negotiated:
@@ -2589,8 +2610,17 @@ class Subscription:
             publication.data = new_data
             self._prev_data = prev_data
 
-        await self.events.on_publication(PublicationContext(pub=publication))
         if publication.offset > 0:
+            self._pending = (session, publication.offset)
+        try:
+            await self.events.on_publication(PublicationContext(pub=publication))
+        finally:
+            if self._pending is not None and self._pending[0] == session:
+                self._pending = None
+        # The position moves after the app has the publication - and only in the
+        # session it belongs to: handlers aren't cancelled, and one that finishes
+        # after its session ended must not move the position (possibly back).
+        if publication.offset > 0 and self._session_current(session):
             self._offset = publication.offset
 
     def _need_recover(self):
