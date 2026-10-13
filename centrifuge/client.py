@@ -577,6 +577,29 @@ class Client:
         return self._id
 
     async def _create_connection(self) -> None:
+        attempt = self._transport_id + 1
+        try:
+            await self._connection_attempt()
+        except Exception as e:
+            # An event handler of the app raised (handlers run as part of the
+            # attempt): the client must not be left connecting with nothing in
+            # progress.
+            logger.exception("exception during connection attempt")
+            await self._handler_failed(attempt, e)
+
+    async def _handler_failed(self, attempt: int, e: Exception) -> None:
+        if self._attempt_current(attempt):
+            # Still connecting: retry with backoff.
+            await self._fail_connection_attempt(attempt)
+        elif self._connection_current(attempt):
+            # While handling a server reply or push: the client can't know what
+            # was applied - stop, as centrifuge-js does.
+            code = _DisconnectedCode.BAD_PROTOCOL
+            await self._disconnect(
+                _code_number(code), f"exception during message handling: {e}", False
+            )
+
+    async def _connection_attempt(self) -> None:
         """One connection attempt: get a token if needed, open the transport, send
         the connect command and handle its reply. Every step acts only while the
         attempt is current - a teardown (disconnect(), a lost connection) or a
@@ -1225,7 +1248,23 @@ class Client:
         sub = self._subs.get(channel)
         if not sub:
             return None
+        connection = self._transport_id
+        try:
+            return await self._subscribe_attempt(sub, channel)
+        except Exception as e:
+            # An event handler of the app raised (handlers run as part of the
+            # subscribe flow): the subscription must not be left subscribing with
+            # nothing in progress.
+            logger.exception("exception during subscribe to %s", channel)
+            if not self._connection_current(connection):
+                return None
+            if sub.state == SubscriptionState.SUBSCRIBING:
+                await sub._schedule_resubscribe()
+            else:
+                await self._handler_failed(connection, e)
+            return None
 
+    async def _subscribe_attempt(self, sub: "Subscription", channel: str):
         if self.state != ClientState.CONNECTED:
             logger.debug("skip subscribe to %s until connected", channel)
             return None
@@ -2077,7 +2116,15 @@ class Client:
             if message is None or self._transport_id != attempt:
                 return
             logger.debug("start processing message: %s", message)
-            await self._process_incoming_data(message, attempt)
+            try:
+                await self._process_incoming_data(message, attempt)
+            except Exception as e:
+                # An event handler of the app raised, or the message can't be
+                # decoded: the client can't know what was applied. It used to stop
+                # reading silently; now it disconnects visibly, as centrifuge-js.
+                logger.exception("exception during message handling")
+                await self._handler_failed(attempt, e)
+                return
 
     async def _listen(self, conn: "ClientConnection", queue: asyncio.Queue, attempt: int) -> None:
         logger.debug("start reading connection")
