@@ -33,9 +33,12 @@ return. The check only proves something is listening: a Centrifugo of another
 project on port 8000 passes it and then hangs the recovery tests, which need
 this compose file's channel options.
 
-The remaining suites (`test_filter`, `test_fossil`, `test_proxy`, `test_ssl`,
-`test_state_invalidation`, `test_sub_refresh`, `test_background_tasks`) use the
-in-process `tests/fake_server.py` or no server at all, and run without Docker.
+The remaining suites (`test_background_tasks`, `test_cancelled_command`,
+`test_filter`, `test_fossil`, `test_json_handshake`, `test_proxy`, `test_ready`,
+`test_refresh`, `test_ssl`, `test_state_invalidation`, `test_sub_refresh`,
+`test_unsubscribe`, `test_utils`) use the in-process `tests/fake_server.py` or no
+server at all, and run without Docker. The fake server speaks protobuf by
+default; `FakeCentrifugoServer(use_protobuf=False)` switches it to JSON.
 
 ## Lint
 
