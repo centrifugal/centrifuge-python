@@ -1,9 +1,8 @@
-import json
+import asyncio
 import unittest
 
-import websockets
-
-from centrifuge import Client, ClientState
+from centrifuge import Client, ClientState, PublicationContext
+from tests.fake_server import FakeCentrifugoServer
 
 # The JSON transport offers no subprotocol, so it must not send a
 # Sec-WebSocket-Protocol header: RFC 6455 allows the header only with at least
@@ -12,30 +11,35 @@ from centrifuge import Client, ClientState
 
 class TestJsonHandshake(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.subprotocol_headers = []
-        self.server = await websockets.serve(self._handler, "localhost", 0)
-        port = self.server.sockets[0].getsockname()[1]
-        self.url = f"ws://localhost:{port}/connection/websocket"
-
-    async def asyncTearDown(self):
-        self.server.close()
-        await self.server.wait_closed()
-
-    async def _handler(self, websocket):
-        headers = websocket.request.headers.get_all("Sec-WebSocket-Protocol")
-        self.subprotocol_headers.append(headers)
-        async for message in websocket:
-            for line in message.split("\n"):
-                command = json.loads(line)
-                if "connect" in command:
-                    result = {"client": "fake-client", "version": "0.0.0"}
-                    await websocket.send(json.dumps({"id": command["id"], "connect": result}))
+        self.server = FakeCentrifugoServer(use_protobuf=False)
+        await self.server.start()
+        self.client = Client(self.server.url, min_reconnect_delay=3600, max_reconnect_delay=3600)
+        self.addAsyncCleanup(self.server.stop)
+        self.addAsyncCleanup(self.client.disconnect)
 
     async def test_json_client_connects_without_a_subprotocol_header(self):
-        client = Client(self.url, min_reconnect_delay=3600, max_reconnect_delay=3600)
-        self.addAsyncCleanup(client.disconnect)
+        await self.client.connect()
 
-        await client.connect()
+        self.assertEqual(self.client.state, ClientState.CONNECTED)
+        self.assertEqual(len(self.server.request_headers), 1)
+        self.assertEqual(self.server.request_headers[0].get_all("Sec-WebSocket-Protocol"), [])
 
-        self.assertEqual(client.state, ClientState.CONNECTED)
-        self.assertEqual(self.subprotocol_headers, [[]])
+    async def test_json_client_receives_publication_data_as_json(self):
+        publications = asyncio.Queue()
+
+        async def on_publication(ctx: PublicationContext) -> None:
+            await publications.put(ctx.pub.data)
+
+        sub = self.client.new_subscription("news")
+        sub.events.on_publication = on_publication
+        await self.client.connect()
+        await sub.subscribe()
+        await sub.ready()
+
+        await self.server.publish(b'{"x": 1}', channel="news")
+
+        self.assertEqual(await asyncio.wait_for(publications.get(), timeout=1), {"x": 1})
+
+
+if __name__ == "__main__":
+    unittest.main()
