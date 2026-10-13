@@ -27,6 +27,8 @@ How to extend (most→least common):
       await server.publish(b"...", channel="news")  # by channel name
   - Fully control any command reply:
       server.on_command = lambda cmd: build_reply(...) or None  # None falls through
+  - Never reply, leaving the request pending:
+      server.drop_command = lambda cmd: cmd.HasField("subscribe")
   - Send anything the protocol allows:
       await server.send_push(some_protocol_push)
   - Drive a reconnect:                await server.close_connection()
@@ -118,6 +120,9 @@ class FakeCentrifugoServer:
         )
         # Full override for any command: (command) -> Reply or None to fall through.
         self.on_command = None
+        # Leave a command without a reply: (command) -> True to drop it. The
+        # command is still recorded in received.
+        self.drop_command = None
         # Customize the subscribe result per channel: (channel, req) -> SubscribeResult.
         self.on_subscribe = None
 
@@ -194,6 +199,9 @@ class FakeCentrifugoServer:
 
     async def _dispatch(self, websocket, cmd):
         self.received.append(cmd)
+
+        if self.drop_command is not None and self.drop_command(cmd):
+            return
 
         if self.on_command is not None:
             reply = self.on_command(cmd)

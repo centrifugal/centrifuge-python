@@ -694,7 +694,7 @@ class Client:
                     continue
                 self._spawn(self._subscribe(channel))
 
-            await self._process_server_subs(connect.get("subs", {}))
+            await self._process_server_subs(connect.get("subs", {}), attempt)
 
     async def _open_transport(self) -> "ClientConnection":
         # None, not an empty list, for JSON: websockets sends an empty
@@ -780,9 +780,13 @@ class Client:
         }
         return command
 
-    async def _process_server_subs(self, subs: Dict[str, Dict[str, Any]]):
+    async def _process_server_subs(self, subs: Dict[str, Dict[str, Any]], attempt: int):
         logger.debug("process server subs: %s", subs)
+        # Event handlers may disconnect the client: nothing more is emitted for a
+        # connection that is over.
         for channel, subscribe in subs.items():
+            if not self._connection_current(attempt):
+                return
             self._server_subs[channel] = _ServerSubscription(
                 offset=int(subscribe.get("offset", 0)),
                 epoch=subscribe.get("epoch", ""),
@@ -814,17 +818,19 @@ class Client:
             if subscribe.get("recovered", False):
                 pubs = subscribe.get("publications", [])
                 for pub in pubs:
+                    if not self._connection_current(attempt):
+                        return
                     await self._process_server_publication(channel, pub)
 
-        channels_to_delete = []
-        for channel in self._server_subs:
-            if subs.get(channel) is None:  # using None is important here to deal with {} too.
-                channels_to_delete.append(channel)
-                handler = self.events.on_unsubscribed
-                await handler(ServerUnsubscribedContext(channel=channel))
-
+        # using None is important here to deal with {} too.
+        channels_to_delete = [ch for ch in self._server_subs if subs.get(ch) is None]
         for channel in channels_to_delete:
             del self._server_subs[channel]
+        for channel in channels_to_delete:
+            if not self._connection_current(attempt):
+                return
+            handler = self.events.on_unsubscribed
+            await handler(ServerUnsubscribedContext(channel=channel))
 
     async def _process_server_publication(self, channel: str, pub: Any):
         publication = self._publication_from_proto(pub)
@@ -1749,17 +1755,21 @@ class Client:
             await self._disconnect(_code_number(code), _code_message(code), True)
 
     async def _process_unsubscribe(self, channel: str, unsubscribe: Dict[str, Any]) -> None:
-        sub = self._subs.get(channel)
+        # Only for a subscribed subscription: an unsubscribe push that arrives
+        # while a subscribe is in progress is for the previous subscription, and
+        # one after unsubscribe() must not resubscribe. Applied before the next
+        # message of the frame is processed.
+        sub = self._subscribed_sub_for_push(channel, 0)
         code = unsubscribe["code"]
         if sub:
             if code < 2500:
-                self._spawn(sub._move_unsubscribed(code, unsubscribe["reason"]))
+                await sub._move_unsubscribed(code, unsubscribe["reason"])
             else:
                 if code == _UNSUBSCRIBED_STATE_INVALIDATED:
                     # State invalidated: drop the subscription token and cached
                     # state so the resubscribe obtains a fresh token and re-syncs.
                     sub._invalidate_state()
-                self._spawn(sub._move_subscribing(code, unsubscribe["reason"]))
+                await sub._move_subscribing(code, unsubscribe["reason"])
         else:
             server_sub = self._server_subs.get(channel)
             if server_sub:
@@ -1814,41 +1824,41 @@ class Client:
         if new_id > 0:
             self._subs_by_id[new_id] = sub
 
-    async def _process_publication(self, channel: str, pub: Any, push_id: int = 0) -> None:
+    def _subscribed_sub_for_push(self, channel: str, push_id: int) -> Optional["Subscription"]:
+        # The client-side subscription a push is for: only a subscribed one. A
+        # push for a subscription that is subscribing or unsubscribed belongs to
+        # a subscribe session that is over (or not established yet) and must not
+        # be applied - it would deliver events the app no longer expects and
+        # move the stream position. None means the push goes to a server-side
+        # subscription of the channel, if any (compacted pushes with a numeric
+        # ID are only ever for client-side subscriptions).
         sub = self._sub_for_push(channel, push_id)
+        if sub is not None and sub.state == SubscriptionState.SUBSCRIBED:
+            return sub
+        return None
+
+    async def _process_publication(self, channel: str, pub: Any, push_id: int = 0) -> None:
+        sub = self._subscribed_sub_for_push(channel, push_id)
         if sub:
             await sub._process_publication(pub)
-        elif push_id > 0:
-            # Compacted push with unknown ID (e.g. already unsubscribed) — drop.
-            return
-        else:
-            server_sub = self._server_subs.get(channel)
-            if server_sub:
-                await self._process_server_publication(channel, pub)
+        elif push_id == 0 and channel in self._server_subs:
+            await self._process_server_publication(channel, pub)
 
     async def _process_join(self, channel: str, join: Any, push_id: int = 0) -> None:
         client_info = self._extract_client_info(join["info"])
-        sub = self._sub_for_push(channel, push_id)
+        sub = self._subscribed_sub_for_push(channel, push_id)
         if sub:
             await sub.events.on_join(JoinContext(info=client_info))
-        elif push_id > 0:
-            return
-        else:
-            server_sub = self._server_subs.get(channel)
-            if server_sub:
-                await self.events.on_join(ServerJoinContext(channel=channel, info=client_info))
+        elif push_id == 0 and channel in self._server_subs:
+            await self.events.on_join(ServerJoinContext(channel=channel, info=client_info))
 
     async def _process_leave(self, channel: str, leave: Any, push_id: int = 0) -> None:
         client_info = self._extract_client_info(leave["info"])
-        sub = self._sub_for_push(channel, push_id)
+        sub = self._subscribed_sub_for_push(channel, push_id)
         if sub:
             await sub.events.on_leave(LeaveContext(info=client_info))
-        elif push_id > 0:
-            return
-        else:
-            server_sub = self._server_subs.get(channel)
-            if server_sub:
-                await self.events.on_leave(ServerLeaveContext(channel=channel, info=client_info))
+        elif push_id == 0 and channel in self._server_subs:
+            await self.events.on_leave(ServerLeaveContext(channel=channel, info=client_info))
 
     def _extract_client_info(self, info: Any) -> ClientInfo:
         return ClientInfo(
@@ -2238,12 +2248,14 @@ class Subscription:
             ),
         )
 
-        publications = subscribe.get("publications", [])
-        if publications:
-            for pub in publications:
-                await self._process_publication(pub)
-
         self._clear_subscribing_state()
+
+        # The handler may have unsubscribed (or the client disconnected): the
+        # recovered publications belong to a subscription that is over then.
+        for pub in subscribe.get("publications", []):
+            if self.state != SubscriptionState.SUBSCRIBED:
+                break
+            await self._process_publication(pub)
 
     async def _refresh(self) -> None:
         if self.state != SubscriptionState.SUBSCRIBED:
@@ -2278,6 +2290,8 @@ class Subscription:
         await self._client._resubscribe(self)
 
     async def _process_publication(self, pub: Any) -> None:
+        if self.state != SubscriptionState.SUBSCRIBED:
+            return
         publication = self._client._publication_from_proto(pub)
 
         if self._delta and self._delta_negotiated:
