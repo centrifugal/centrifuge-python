@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import sys
 import time
 import unittest
@@ -258,3 +259,35 @@ class TestCancelledConnect(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await wait_until(lambda: client.state == ClientState.CONNECTED))
         self.assertEqual(len(calls), 2)
         await client.disconnect()
+
+
+class TestLargeMessage(unittest.IsolatedAsyncioTestCase):
+    async def test_message_over_1mib_delivered(self):
+        # The suite logs the SDK at DEBUG level (see test_client.py), and the SDK
+        # logs every message it receives in full: megabytes of log lines per
+        # message, which CI log streaming can't keep up with.
+        centrifuge_logger = logging.getLogger("centrifuge")
+        previous_level = centrifuge_logger.level
+        centrifuge_logger.setLevel(logging.INFO)
+        self.addCleanup(centrifuge_logger.setLevel, previous_level)
+
+        server = FakeCentrifugoServer()
+        await server.start()
+        client = make_client(server.url)
+        sub = client.new_subscription("big")
+        received = []
+
+        async def on_publication(ctx):
+            received.append(len(ctx.pub.data))
+
+        sub.events.on_publication = on_publication
+        await client.connect()
+        await sub.subscribe()
+        await sub.ready()
+
+        size = 2 * 1024 * 1024
+        await server.publish(b"a" * size, channel="big")
+        self.assertTrue(await wait_until(lambda: received == [size]))
+        self.assertEqual(len(connect_commands(server)), 1)
+        await client.disconnect()
+        await server.stop()

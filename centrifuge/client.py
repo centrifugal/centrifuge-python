@@ -720,6 +720,10 @@ class Client:
             # sent over the connection.
             open_timeout=self._timeout,
             close_timeout=_CLOSE_TIMEOUT,
+            # websockets closes the connection on a message over 1 MiB by default,
+            # and a recovery reply can be larger: the server decides how large a
+            # message can be.
+            max_size=None,
             **connect_kwargs,
         )
 
