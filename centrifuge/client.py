@@ -1649,11 +1649,18 @@ class Client:
             if self._transition != transition:
                 return
 
-        if not reconnect or previous_state == ClientState.CONNECTED:
+        # As in centrifuge-js and the SDK spec: a connection that is lost and
+        # going to reconnect moves to connecting (with the reason); disconnected
+        # is only for disconnect() and terminal codes. A failed attempt that
+        # retries stays connecting, without an event.
+        if not reconnect:
             handler = self.events.on_disconnected
             await handler(DisconnectedContext(code=code, reason=reason))
-            if self._transition != transition:
-                return
+        elif previous_state == ClientState.CONNECTED:
+            handler = self.events.on_connecting
+            await handler(ConnectingContext(code=code, reason=reason))
+        if self._transition != transition:
+            return
 
         if reconnect:
             await self._schedule_reconnect()

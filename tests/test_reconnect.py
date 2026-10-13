@@ -56,3 +56,27 @@ class TestReconnectAfterConnect(unittest.IsolatedAsyncioTestCase):
         await self.server.close_connection()
         self.assertTrue(await wait_until(lambda: len(connect_commands(self.server)) == 3))
         self.assertTrue(await wait_until(lambda: self.client.state == ClientState.CONNECTED))
+
+    async def test_lost_connection_reports_connecting(self):
+        events = []
+
+        async def on_connecting(ctx):
+            events.append(("connecting", ctx.code))
+
+        async def on_disconnected(ctx):
+            events.append(("disconnected", ctx.code))
+
+        self.client.events.on_connecting = on_connecting
+        self.client.events.on_disconnected = on_disconnected
+        await self.client.connect()
+        await self.client.ready()
+
+        await self.server.close_connection()
+        self.assertTrue(await wait_until(lambda: len(connect_commands(self.server)) == 2))
+        await self.client.ready()
+        # connect() and the lost connection (code 1, transport closed): connecting,
+        # never disconnected.
+        self.assertEqual(events, [("connecting", 0), ("connecting", 1)])
+
+        await self.client.disconnect()
+        self.assertEqual(events[-1], ("disconnected", 0))
