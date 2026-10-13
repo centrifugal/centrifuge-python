@@ -474,6 +474,11 @@ class Client:
         if not sub:
             return
 
+        # Only this subscription: one removed before must not remove a newer
+        # subscription of the same channel.
+        if self._subs.get(sub.channel) is not sub:
+            return
+
         if sub.state != SubscriptionState.UNSUBSCRIBED:
             raise CentrifugeError("can not remove subscription in non-unsubscribed state")
 
@@ -1437,10 +1442,7 @@ class Client:
         self._subs[sub.channel] = sub
         self._spawn(self._subscribe(sub.channel))
 
-    async def _unsubscribe(self, channel: str):
-        sub = self._subs.get(channel)
-        if not sub:
-            return
+    async def _unsubscribe(self, sub: "Subscription"):
 
         if self.state != ClientState.CONNECTED:
             # Server-side subscriptions do not outlive the connection, so there is
@@ -2231,6 +2233,10 @@ class Subscription:
         self._tags_filter = tags_filter
 
     async def subscribe(self) -> None:
+        if self._client is None:
+            raise CentrifugeError(
+                f"subscription to {self.channel} was removed from the client, create a new one"
+            )
         if self.state == SubscriptionState.SUBSCRIBING:
             return
         if self.state == SubscriptionState.SUBSCRIBED:
@@ -2283,6 +2289,9 @@ class Subscription:
         if self.state == SubscriptionState.UNSUBSCRIBED:
             return
 
+        # The handler below may remove the subscription from the client.
+        client = self._client
+
         if self.state == SubscriptionState.SUBSCRIBED:
             self._clear_subscribed_state()
         elif self.state == SubscriptionState.SUBSCRIBING:
@@ -2308,9 +2317,9 @@ class Subscription:
             ),
         )
 
-        if send_unsubscribe_command:
+        if send_unsubscribe_command and client is not None:
             # noinspection PyProtectedMember
-            await self._client._unsubscribe(self.channel)
+            await client._unsubscribe(self)
 
     async def _consume_subscribed_future(self) -> None:
         with contextlib.suppress(CentrifugeError):
