@@ -670,7 +670,7 @@ class Client:
                     self._refresh_timer.cancel()
                 self._refresh_timer = self._loop.call_later(
                     ttl,
-                    lambda: self._spawn(self._refresh()),
+                    lambda: self._spawn(self._refresh(attempt)),
                 )
 
             self._connected_future.set_result(True)
@@ -896,33 +896,30 @@ class Client:
         code = _DisconnectedCode.DISCONNECT_CALLED
         await self._disconnect(_code_number(code), _code_message(code), False)
 
-    async def _refresh(self) -> None:
-        # Mirrors the guard in Subscription._refresh: a refresh only makes sense
-        # over a live connection, the next connect carries the token itself.
-        if self.state != ClientState.CONNECTED:
+    async def _refresh(self, connection: Optional[int] = None) -> None:
+        """One step of the connection token refresh chain. The chain belongs to the
+        connection it was started for: every step stops once that connection is
+        over, so a token request or refresh command still in flight across a
+        reconnect does not refresh the next connection, which runs its own chain."""
+        if connection is None:
+            connection = self._transport_id
+        if not self._connection_current(connection) or not self._get_token:
             return
 
         try:
             token = await self._get_token()
+        except asyncio.CancelledError as e:
+            if _task_cancelling():
+                raise
+            await self._refresh_token_failed(connection, e)
+            return
         except Exception as e:
-            if isinstance(e, UnauthorizedError):
-                code = _DisconnectedCode.UNAUTHORIZED
-                await self._disconnect(_code_number(code), _code_message(code), False)
-                return
-            handler = self.events.on_error
-            await handler(
-                ErrorContext(code=_code_number(_ErrorCode.CLIENT_REFRESH_TOKEN), error=e),
-            )
-            self._schedule_refresh_retry()
+            await self._refresh_token_failed(connection, e)
             return
 
+        if not self._connection_current(connection):
+            return
         self._token = token
-
-        # Re-check state after async get_token(). The fetched token is kept - the
-        # next connect uses it - but sending a refresh over a connection which is
-        # already gone is pointless.
-        if self.state != ClientState.CONNECTED:
-            return
 
         cmd_id = self._next_command_id()
         command = {
@@ -937,13 +934,18 @@ class Client:
         try:
             reply = await future
         except Exception as e:
+            if not self._connection_current(connection):
+                return
             handler = self.events.on_error
             await handler(
                 ErrorContext(code=_code_number(_ErrorCode.CLIENT_REFRESH_TOKEN), error=e),
             )
             # The command did not reach the server (timeout, transport closed) -
             # retry, otherwise the connection is left with no refresh scheduled.
-            self._schedule_refresh_retry()
+            self._schedule_refresh_retry(connection)
+            return
+
+        if not self._connection_current(connection):
             return
 
         if reply.get("error"):
@@ -961,22 +963,35 @@ class Client:
                     error=ReplyError(code, message, temporary),
                 ),
             )
-            self._schedule_refresh_retry()
+            self._schedule_refresh_retry(connection)
             return
 
         refresh = reply["refresh"]
         expires = refresh.get("expires", False)
         if expires:
             ttl = refresh["ttl"]
-            # Cancel existing refresh timer to prevent timer leaks
+            # A new step replaces the pending one.
             if self._refresh_timer:
                 self._refresh_timer.cancel()
             self._refresh_timer = self._loop.call_later(
                 ttl,
-                lambda: self._spawn(self._refresh()),
+                lambda: self._spawn(self._refresh(connection)),
             )
 
-    def _schedule_refresh_retry(self) -> None:
+    async def _refresh_token_failed(self, connection: int, e: BaseException) -> None:
+        if not self._connection_current(connection):
+            return
+        if isinstance(e, UnauthorizedError):
+            code = _DisconnectedCode.UNAUTHORIZED
+            await self._disconnect(_code_number(code), _code_message(code), False)
+            return
+        handler = self.events.on_error
+        await handler(
+            ErrorContext(code=_code_number(_ErrorCode.CLIENT_REFRESH_TOKEN), error=e),
+        )
+        self._schedule_refresh_retry(connection)
+
+    def _schedule_refresh_retry(self, connection: int) -> None:
         """Re-arm the connection token refresh after a temporary failure.
 
         Without it a single transient error (a failing get_token callback, a lost
@@ -984,7 +999,7 @@ class Client:
         connection with no further refresh attempts until the server drops it as
         expired, while the SDK spec promises a retry after some jittered time.
         """
-        if self.state != ClientState.CONNECTED or not self._get_token:
+        if not self._connection_current(connection) or not self._get_token:
             return
         if self._refresh_timer:
             self._refresh_timer.cancel()
@@ -992,33 +1007,39 @@ class Client:
         logger.debug("retry connection token refresh in %f", delay)
         self._refresh_timer = self._loop.call_later(
             delay,
-            lambda: self._spawn(self._refresh()),
+            lambda: self._spawn(self._refresh(connection)),
         )
 
-    async def _sub_refresh(self, channel: str):
+    async def _sub_refresh(self, channel: str, session: Optional[int] = None):
+        """One step of a subscription token refresh chain. The chain belongs to the
+        subscribed session (and connection) it was started for: a token that
+        arrives after the subscription resubscribed or the client reconnected is
+        not used - the new session runs its own chain."""
         sub = self._subs.get(channel)
         if not sub:
+            return
+        if session is None:
+            session = sub._attempt
+        connection = self._transport_id
+
+        def current() -> bool:
+            return sub._session_current(session) and self._connection_current(connection)
+
+        if not current() or not sub._get_token:
             return
 
         try:
             token = await sub._get_token(channel)
+        except asyncio.CancelledError as e:
+            if _task_cancelling():
+                raise
+            await self._sub_refresh_token_failed(sub, session, current, e)
+            return
         except Exception as e:
-            if isinstance(e, UnauthorizedError):
-                code = _UnsubscribedCode.UNAUTHORIZED
-                await sub._move_unsubscribed(
-                    _code_number(code),
-                    _code_message(code),
-                    send_unsubscribe_command=True,
-                )
-                return
-            handler = sub.events.on_error
-            await handler(
-                SubscriptionErrorContext(
-                    code=_code_number(_ErrorCode.SUBSCRIPTION_REFRESH_TOKEN),
-                    error=e,
-                ),
-            )
-            self._schedule_sub_refresh_retry(sub)
+            await self._sub_refresh_token_failed(sub, session, current, e)
+            return
+
+        if not current():
             return
 
         cmd_id = self._next_command_id()
@@ -1037,6 +1058,8 @@ class Client:
         try:
             reply = await future
         except Exception as e:
+            if not current():
+                return
             handler = sub.events.on_error
             await handler(
                 SubscriptionErrorContext(
@@ -1046,7 +1069,10 @@ class Client:
             )
             # The command did not reach the server (timeout, transport closed) -
             # retry, otherwise the subscription is left with no refresh scheduled.
-            self._schedule_sub_refresh_retry(sub)
+            self._schedule_sub_refresh_retry(sub, session)
+            return
+
+        if not current():
             return
 
         if reply.get("error"):
@@ -1063,27 +1089,49 @@ class Client:
                     error=ReplyError(code, message, temporary),
                 ),
             )
-            self._schedule_sub_refresh_retry(sub)
+            self._schedule_sub_refresh_retry(sub, session)
             return
 
         sub_refresh = reply["sub_refresh"]
         expires = sub_refresh.get("expires", False)
         if expires:
             ttl = sub_refresh["ttl"]
-            # Cancel existing subscription refresh timer to prevent timer leaks
+            # A new step replaces the pending one.
             if sub._refresh_timer:
                 sub._refresh_timer.cancel()
             sub._refresh_timer = self._loop.call_later(
                 ttl,
-                lambda: self._spawn(sub._refresh()),
+                lambda: self._spawn(sub._refresh(session)),
             )
 
-    def _schedule_sub_refresh_retry(self, sub: "Subscription") -> None:
+    async def _sub_refresh_token_failed(
+        self, sub: "Subscription", session: int, current: Callable[[], bool], e: BaseException
+    ) -> None:
+        if not current():
+            return
+        if isinstance(e, UnauthorizedError):
+            code = _UnsubscribedCode.UNAUTHORIZED
+            await sub._move_unsubscribed(
+                _code_number(code),
+                _code_message(code),
+                send_unsubscribe_command=True,
+            )
+            return
+        handler = sub.events.on_error
+        await handler(
+            SubscriptionErrorContext(
+                code=_code_number(_ErrorCode.SUBSCRIPTION_REFRESH_TOKEN),
+                error=e,
+            ),
+        )
+        self._schedule_sub_refresh_retry(sub, session)
+
+    def _schedule_sub_refresh_retry(self, sub: "Subscription", session: int) -> None:
         """Re-arm the subscription token refresh after a temporary failure.
 
         The subscription counterpart of _schedule_refresh_retry above.
         """
-        if sub.state != SubscriptionState.SUBSCRIBED or not sub._get_token:
+        if not sub._session_current(session) or not sub._get_token:
             return
         if sub._refresh_timer:
             sub._refresh_timer.cancel()
@@ -1091,7 +1139,7 @@ class Client:
         logger.debug("retry subscription token refresh for %s in %f", sub.channel, delay)
         sub._refresh_timer = self._loop.call_later(
             delay,
-            lambda: self._spawn(sub._refresh()),
+            lambda: self._spawn(sub._refresh(session)),
         )
 
     @staticmethod
@@ -1110,45 +1158,46 @@ class Client:
 
         logger.debug("subscribe to channel %s", channel)
 
+        # Every step below acts only for this subscribe attempt over this
+        # connection: after unsubscribe() + subscribe(), a resubscribe or a
+        # reconnect, the attempt is over - its token, state or reply is not used.
+        attempt = sub._next_attempt()
+        connection = self._transport_id
+
+        def current() -> bool:
+            return (
+                sub._attempt == attempt
+                and sub.state == SubscriptionState.SUBSCRIBING
+                and self._connection_current(connection)
+            )
+
         # get_state: ask the app for its current state position. Only called when
         # we don't have a saved position (first subscribe or after a position reset
         # due to unrecoverable position error 112). On normal reconnects with a
         # valid saved position we skip get_state and let the server try recovery —
         # get_state is only called again if recovery fails.
         if sub._get_state and not sub._need_recover():
-            proceed = await self._load_state_position(sub, channel)
+            proceed = await self._load_state_position(sub, channel, attempt, current)
             if not proceed:
                 return None
 
         if not sub._token and sub._get_token:
             try:
                 token = await sub._get_token(channel)
+            except asyncio.CancelledError as e:
+                if _task_cancelling():
+                    raise
+                await self._subscribe_token_failed(sub, current, e)
+                return False
             except Exception as e:
-                if isinstance(e, UnauthorizedError):
-                    code = _UnsubscribedCode.UNAUTHORIZED
-                    await sub._move_unsubscribed(_code_number(code), _code_message(code))
-                    return False
-                handler = sub.events.on_error
-                await handler(
-                    SubscriptionErrorContext(
-                        code=_code_number(_ErrorCode.SUBSCRIPTION_SUBSCRIBE_TOKEN),
-                        error=e,
-                    ),
-                )
-                self._spawn(sub._schedule_resubscribe())
+                await self._subscribe_token_failed(sub, current, e)
                 return False
 
+            # A token requested by an attempt that is over is not used.
+            if not current():
+                logger.debug("subscribe attempt for %s is over after token fetch", channel)
+                return None
             sub._token = token
-
-        # Re-check client state after async token fetch
-        if self.state != ClientState.CONNECTED:
-            logger.debug("client disconnected during token fetch for %s", channel)
-            return None
-
-        # Re-check subscription state after async token fetch
-        if sub.state != SubscriptionState.SUBSCRIBING:
-            logger.debug("subscription state changed during token fetch for %s", channel)
-            return None
 
         cmd_id = self._next_command_id()
         command = self._construct_subscribe_command(sub, cmd_id)
@@ -1156,8 +1205,12 @@ class Client:
             await self._send_commands([command])
             try:
                 reply = await future
+            except ClientDisconnectedError:
+                # The connection is gone; the subscription resubscribes once the
+                # client is connected again. Not a subscribe failure.
+                return None
             except OperationTimeoutError as e:
-                if sub.state != SubscriptionState.SUBSCRIBING:
+                if not current():
                     return None
                 handler = sub.events.on_error
                 await handler(
@@ -1166,7 +1219,7 @@ class Client:
                 await sub._schedule_resubscribe()
                 return None
             except Exception as e:
-                if sub.state != SubscriptionState.SUBSCRIBING:
+                if not current():
                     return None
                 handler = sub.events.on_error
                 await handler(
@@ -1178,7 +1231,9 @@ class Client:
                 await sub._schedule_resubscribe()
                 return None
 
-            if sub.state != SubscriptionState.SUBSCRIBING:
+            # A reply to an attempt that is over (e.g. before unsubscribe() +
+            # subscribe()) is not applied to the newer one.
+            if not current():
                 return None
 
             if reply.get("error"):
@@ -1211,7 +1266,29 @@ class Client:
             else:
                 await sub._move_subscribed(reply["subscribe"])
 
-    async def _load_state_position(self, sub: "Subscription", channel: str) -> bool:
+    @staticmethod
+    async def _subscribe_token_failed(
+        sub: "Subscription", current: Callable[[], bool], e: BaseException
+    ) -> None:
+        if not current():
+            return
+        if isinstance(e, UnauthorizedError):
+            code = _UnsubscribedCode.UNAUTHORIZED
+            await sub._move_unsubscribed(_code_number(code), _code_message(code))
+            return
+        handler = sub.events.on_error
+        await handler(
+            SubscriptionErrorContext(
+                code=_code_number(_ErrorCode.SUBSCRIPTION_SUBSCRIBE_TOKEN),
+                error=e,
+            ),
+        )
+        if current():
+            await sub._schedule_resubscribe()
+
+    async def _load_state_position(
+        self, sub: "Subscription", channel: str, attempt: int, current: Callable[[], bool]
+    ) -> bool:
         """Run sub._get_state and store the returned position on the subscription.
 
         Returns True when the subscribe flow may proceed, False when it must stop
@@ -1221,7 +1298,7 @@ class Client:
         try:
             position = await sub._get_state(channel)
         except Exception as e:
-            if sub.state != SubscriptionState.SUBSCRIBING:
+            if not current():
                 return False
             handler = sub.events.on_error
             await handler(
@@ -1233,19 +1310,20 @@ class Client:
             self._spawn(sub._schedule_resubscribe())
             return False
 
-        # Re-check subscription state after async get_state()
-        if sub.state != SubscriptionState.SUBSCRIBING:
-            logger.debug("subscription state changed during get_state for %s", channel)
+        # A position loaded for an attempt that is over is not used: a later
+        # attempt may have recovered already, and this one would rewind it.
+        if sub._attempt != attempt or sub.state != SubscriptionState.SUBSCRIBING:
+            logger.debug("subscribe attempt for %s is over after get_state", channel)
             return False
 
         sub._recover = True
         sub._offset = position.offset
         sub._epoch = position.epoch
 
-        # Re-check client state after async get_state(). The loaded position is
+        # Re-check the connection after async get_state(). The loaded position is
         # kept (matches other SDKs): the resubscribe on reconnect recovers from
         # it instead of calling get_state again.
-        if self.state != ClientState.CONNECTED:
+        if not current():
             logger.debug("client disconnected during get_state for %s", channel)
             return False
 
@@ -2018,6 +2096,11 @@ class Subscription:
         # Numeric channel ID assigned by the server when channel compaction is
         # negotiated. Pushes then carry this ID instead of the channel name.
         self._push_id: int = 0
+        # Identifies the current subscribe attempt, or the current subscribed
+        # session. Changes on every subscribe attempt and every state change;
+        # token and state requests, subscribe replies and refresh steps check it
+        # and stop when theirs is over.
+        self._attempt: int = 0
 
         if delta and delta not in {DeltaType.FOSSIL}:
             raise CentrifugeError("unsupported delta format")
@@ -2110,6 +2193,13 @@ class Subscription:
             send_unsubscribe_command=True,
         )
 
+    def _next_attempt(self) -> int:
+        self._attempt += 1
+        return self._attempt
+
+    def _session_current(self, session: int) -> bool:
+        return self._attempt == session and self.state == SubscriptionState.SUBSCRIBED
+
     def _clear_subscribed_state(self) -> None:
         if self._refresh_timer:
             logger.debug("canceling refresh timer for %s", self.channel)
@@ -2138,6 +2228,7 @@ class Subscription:
             self._clear_subscribing_state()
 
         self.state = SubscriptionState.UNSUBSCRIBED
+        self._attempt += 1
         # Channel compaction ID is no longer valid once unsubscribed.
         self._set_push_id(0)
 
@@ -2177,6 +2268,7 @@ class Subscription:
             self._clear_subscribed_state()
 
         self.state = SubscriptionState.SUBSCRIBING
+        self._attempt += 1
         if self._subscribed_future.done():
             self._subscribed_future = asyncio.Future()
 
@@ -2202,6 +2294,7 @@ class Subscription:
             return
 
         self.state = SubscriptionState.SUBSCRIBED
+        session = self._next_attempt()
         self._subscribed_future.set_result(True)
         on_subscribed_handler = self.events.on_subscribed
         recoverable = subscribe.get("recoverable", False)
@@ -2226,7 +2319,7 @@ class Subscription:
                 self._refresh_timer.cancel()
             self._refresh_timer = self._client._loop.call_later(
                 ttl,
-                lambda: self._client._spawn(self._refresh()),
+                lambda: self._client._spawn(self._refresh(session)),
             )
 
         self._delta_negotiated = subscribe.get("delta", False)
@@ -2257,10 +2350,12 @@ class Subscription:
                 break
             await self._process_publication(pub)
 
-    async def _refresh(self) -> None:
-        if self.state != SubscriptionState.SUBSCRIBED:
+    async def _refresh(self, session: Optional[int] = None) -> None:
+        if session is None:
+            session = self._attempt
+        if not self._session_current(session):
             return
-        await self._client._sub_refresh(self.channel)
+        await self._client._sub_refresh(self.channel, session)
 
     async def _schedule_resubscribe(self) -> None:
         if self.state != SubscriptionState.SUBSCRIBING:
