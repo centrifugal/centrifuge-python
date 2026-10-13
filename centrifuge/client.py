@@ -1023,6 +1023,11 @@ class Client:
 
         if not self._connection_current(connection):
             return
+        if not token:
+            # As in centrifuge-js: no token to refresh the connection with.
+            code = _DisconnectedCode.UNAUTHORIZED
+            await self._disconnect(_code_number(code), _code_message(code), False)
+            return
         self._token = token
 
         cmd_id = self._next_command_id()
@@ -1144,6 +1149,13 @@ class Client:
             return
 
         if not current():
+            return
+        if not token:
+            # As in centrifuge-js: no token to refresh the subscription with.
+            code = _UnsubscribedCode.UNAUTHORIZED
+            await sub._move_unsubscribed(
+                _code_number(code), _code_message(code), send_unsubscribe_command=True
+            )
             return
 
         cmd_id = self._next_command_id()
@@ -1317,6 +1329,11 @@ class Client:
             if not current():
                 logger.debug("subscribe attempt for %s is over after token fetch", channel)
                 return None
+            if not token:
+                # As in centrifuge-js: no token to subscribe with.
+                code = _UnsubscribedCode.UNAUTHORIZED
+                await sub._move_unsubscribed(_code_number(code), _code_message(code))
+                return False
             sub._token = token
 
         cmd_id = self._next_command_id()

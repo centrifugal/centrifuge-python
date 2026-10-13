@@ -144,3 +144,57 @@ class TestStaticTokens(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.2)
         self.assertEqual(tokens(self.server, "subscribe"), ["sub-static"])
         await client.disconnect()
+
+
+class TestEmptyTokens(unittest.IsolatedAsyncioTestCase):
+    """An empty token from get_token means unauthorized, except at connect,
+    where it is a valid (anonymous) token - as in centrifuge-js."""
+
+    async def asyncSetUp(self):
+        self.server = FakeCentrifugoServer()
+        await self.server.start()
+
+    async def asyncTearDown(self):
+        await self.server.stop()
+
+    async def test_empty_subscription_token_unsubscribes(self):
+        async def get_token(_channel):
+            return ""
+
+        client = Client(self.server.url, use_protobuf=True)
+        sub = client.new_subscription("ch", get_token=get_token)
+        codes = []
+
+        async def on_unsubscribed(ctx):
+            codes.append(ctx.code)
+
+        sub.events.on_unsubscribed = on_unsubscribed
+        await client.connect()
+        await sub.subscribe()
+        self.assertTrue(await wait_until(lambda: sub.state == SubscriptionState.UNSUBSCRIBED))
+        self.assertEqual(codes, [_UNAUTHORIZED])
+        self.assertEqual(tokens(self.server, "subscribe"), [])
+        await client.disconnect()
+
+    async def test_empty_refresh_token_disconnects(self):
+        self.server.connect_result.expires = True
+        self.server.connect_result.ttl = 1
+        calls = []
+
+        async def get_token():
+            calls.append(1)
+            return "token" if len(calls) == 1 else ""
+
+        client = Client(self.server.url, use_protobuf=True, get_token=get_token)
+        codes = []
+
+        async def on_disconnected(ctx):
+            codes.append(ctx.code)
+
+        client.events.on_disconnected = on_disconnected
+        await client.connect()
+        self.assertTrue(
+            await wait_until(lambda: client.state == ClientState.DISCONNECTED, timeout=4)
+        )
+        self.assertEqual(codes, [_UNAUTHORIZED])
+        self.assertEqual(tokens(self.server, "refresh"), [])
