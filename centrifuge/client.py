@@ -354,6 +354,10 @@ class Client:
         self._ssl_context = ssl_context
         self._proxy = proxy
         self._server_subs: Dict[str, _ServerSubscription] = {}
+        # Server-side publications whose handler is running: channel ->
+        # (connection, offset). Committed when the connection ends during the
+        # handler, so the next connect recovers after them.
+        self._server_pending: Dict[str, Tuple[int, int]] = {}
         # Channel compaction: numeric channel ID -> subscription, used to route
         # pushes that carry an ID instead of the string channel name. IDs are
         # scoped to a server session — the registry is dropped when the connected
@@ -924,9 +928,15 @@ class Client:
     async def _process_server_publication(self, channel: str, pub: Any):
         publication = self._publication_from_proto(pub)
         connection = self._transport_id
-        await self.events.on_publication(
-            ServerPublicationContext(channel=channel, pub=publication)
-        )
+        if publication.offset > 0:
+            self._server_pending[channel] = (connection, publication.offset)
+        try:
+            await self.events.on_publication(
+                ServerPublicationContext(channel=channel, pub=publication)
+            )
+        finally:
+            if self._server_pending.get(channel, (None,))[0] == connection:
+                del self._server_pending[channel]
         # A handler that finishes after its connection was lost (handlers aren't
         # cancelled) must not move the position the next connection recovers
         # from, possibly back.
@@ -1880,6 +1890,12 @@ class Client:
             self._invalidate_connection_state()
 
         previous_state = self.state
+        # Server-side publications being handled count as delivered.
+        for channel, (connection, offset) in self._server_pending.items():
+            server_sub = self._server_subs.get(channel)
+            if connection == self._transport_id and server_sub is not None:
+                server_sub.offset = offset
+        self._server_pending.clear()
         # Abandons the attempt in progress, or the connection.
         self._transport_id += 1
         self._transition += 1
@@ -1974,6 +1990,8 @@ class Client:
             self._refresh_required = True
         for sub in self._subs.values():
             sub._invalidate_state()
+        # Positions of publications being handled are invalidated too.
+        self._server_pending.clear()
         for server_sub in self._server_subs.values():
             # Reset cached recovery position to a sentinel the server can never
             # match, mirroring _invalidate_state() above for client-side subs.
@@ -2716,5 +2734,6 @@ class Subscription:
             self._token = ""
         self._offset = 0
         self._epoch = "_"
+        self._pending = None
         self._prev_data = None
         self._set_push_id(0)

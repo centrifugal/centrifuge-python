@@ -90,3 +90,45 @@ class TestPosition(unittest.IsolatedAsyncioTestCase):
         # Publication 5 was delivered: the new subscription recovers after it.
         self.assertEqual(subscribe_commands(self.server)[1].offset, 5)
         self.assertTrue(await wait_until(lambda: self.sub.state == SubscriptionState.SUBSCRIBED))
+
+
+class TestServerSidePosition(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.server = FakeCentrifugoServer()
+        self.server.connect_result.subs["ss"].CopyFrom(
+            protocol.SubscribeResult(recoverable=True, epoch="e", offset=4)
+        )
+        await self.server.start()
+        self.client = Client(self.server.url, use_protobuf=True, min_reconnect_delay=0.05)
+
+    async def asyncTearDown(self):
+        await self.client.disconnect()
+        await self.server.stop()
+
+    def _recovery_offsets(self):
+        return [
+            cmd.connect.subs["ss"].offset
+            for cmd in self.server.received
+            if cmd.HasField("connect") and "ss" in cmd.connect.subs
+        ]
+
+    async def test_publication_handled_across_reconnect_counts_as_delivered(self):
+        gate = asyncio.Event()
+
+        async def on_publication(_ctx):
+            await gate.wait()  # still running when the connection is lost
+
+        self.client.events.on_publication = on_publication
+        await self.client.connect()
+        await self.client.ready()
+        push = protocol.Push(channel="ss")
+        push.pub.data = b"5"
+        push.pub.offset = 5
+        await self.server.send_push(push)
+        await asyncio.sleep(0.1)
+
+        await self.server.close_connection()
+        self.assertTrue(await wait_until(self._recovery_offsets))
+        # Publication 5 was delivered to the app: recover after it.
+        self.assertEqual(self._recovery_offsets(), [5])
+        gate.set()
