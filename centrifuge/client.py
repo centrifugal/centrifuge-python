@@ -1258,7 +1258,12 @@ class Client:
                 await handler(
                     SubscriptionErrorContext(code=_code_number(_ErrorCode.TIMEOUT), error=e),
                 )
-                await sub._schedule_resubscribe()
+                # The server may have subscribed (the reply was lost or late): a
+                # subscribe retry on this connection would be denied as already
+                # subscribed. Reconnect, as centrifuge-js does.
+                if current():
+                    code = _ConnectingCode.SUBSCRIBE_TIMEOUT
+                    await self._disconnect(_code_number(code), _code_message(code), True)
                 return None
             except Exception as e:
                 if not current():
@@ -1459,19 +1464,29 @@ class Client:
             "unsubscribe": unsubscribe,
         }
         future = self._register_future(cmd_id, self._timeout)
+        connection = self._transport_id
 
         await self._send_commands([command])
+        # The reply is handled on its own: unsubscribe() may be called from an
+        # event handler, i.e. from the task that processes replies.
+        self._spawn(self._unsubscribe_result(future, connection))
 
+    async def _unsubscribe_result(self, future: asyncio.Future, connection: int) -> None:
         try:
-            await future
-        except OperationTimeoutError:
-            code = _ConnectingCode.UNSUBSCRIBE_ERROR
-            await self._disconnect(_code_number(code), _code_message(code), True)
-            return
+            reply = await future
         except ClientDisconnectedError:
             # The connection was lost before the reply - the subscription is gone
             # on the server together with it.
             return
+        except OperationTimeoutError:
+            reply = None
+        if not self._connection_current(connection):
+            return
+        if reply is None or reply.get("error"):
+            # The server may still hold the subscription (and keep sending its
+            # publications): reconnect, as centrifuge-js does.
+            code = _ConnectingCode.UNSUBSCRIBE_ERROR
+            await self._disconnect(_code_number(code), _code_message(code), True)
 
     def _register_future(self, cmd_id: int, timeout: float) -> asyncio.Future:
         future = asyncio.Future()

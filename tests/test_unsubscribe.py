@@ -68,6 +68,12 @@ class TestUnsubscribeWire(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.sub.unsubscribe(), timeout=1)
 
         self.assertEqual(self.sub.state, SubscriptionState.UNSUBSCRIBED)
+        # unsubscribe() returns once the command is sent; the reply (here: the
+        # lost connection) is handled on its own.
+        for _ in range(100):
+            if _sent_unsubscribe(self.server):
+                break
+            await asyncio.sleep(0.01)
         self.assertTrue(_sent_unsubscribe(self.server))
         await asyncio.gather(*close_tasks)
 
