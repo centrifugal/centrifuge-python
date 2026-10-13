@@ -310,6 +310,9 @@ class Client:
         self.__connected_future: Optional[asyncio.Future] = None
         self._token = token
         self._get_token = get_token
+        # Set when the server answered "token expired" (109): the next attempt gets
+        # a new token from get_token - or, without one, stops as unauthorized.
+        self._refresh_required = False
         self._bound_loop = loop
         self._inflight_commands: Dict[int, _Callback] = {}
         self._reconnect_attempts = 0
@@ -551,7 +554,23 @@ class Client:
             self._stop_transport_tasks()
             self._close_transport()
 
-        if not self._token and self._get_token:
+        if self._refresh_required and self._get_token is None:
+            # The token expired and there is nothing to get a new one with.
+            handler = self.events.on_error
+            await handler(
+                ErrorContext(
+                    code=_code_number(_ErrorCode.BAD_CONFIGURATION),
+                    error=CentrifugeError(
+                        "token expired but no get_token function set in the configuration"
+                    ),
+                )
+            )
+            if self._attempt_current(attempt):
+                code = _DisconnectedCode.UNAUTHORIZED
+                await self._disconnect(_code_number(code), _code_message(code), False)
+            return
+
+        if self._get_token and (self._refresh_required or not self._token):
             try:
                 token = await self._get_token()
             except asyncio.CancelledError as e:
@@ -567,6 +586,7 @@ class Client:
             if not self._attempt_current(attempt):
                 return
             self._token = token
+            self._refresh_required = False
 
         open_task = asyncio.ensure_future(self._open_transport())
         self._open_task = open_task
@@ -609,6 +629,7 @@ class Client:
 
         cmd_id = self._next_command_id()
         command = self._construct_connect_command(cmd_id)
+        sent_token = self._token
         async with self._register_future_with_done(cmd_id) as future:
             await self._send_commands([command])
 
@@ -640,7 +661,10 @@ class Client:
                 code, message, temporary = self._extract_error_details(reply)
                 if _is_token_expired(code):
                     temporary = True
-                    self._token = ""
+                    # The next attempt gets a new token - unless the app set one
+                    # meanwhile (see set_token).
+                    if sent_token == self._token:
+                        self._refresh_required = True
                 if temporary:
                     handler = self.events.on_error
                     await handler(
@@ -654,47 +678,51 @@ class Client:
                     await self._disconnect(code, message, False)
                 return
 
-            connect = reply["connect"]
-            self.client_id = connect["client"]
-            self.state = ClientState.CONNECTED
-            self._send_pong = connect.get("pong", False)
-            self._ping_interval = connect.get("ping", 0)
-            if self._ping_interval > 0:
-                self._restart_ping_wait()
+            await self._connected(reply["connect"], attempt)
 
-            expires = connect.get("expires", False)
-            if expires:
-                ttl = connect["ttl"]
-                # Cancel existing refresh timer to prevent timer leaks
-                if self._refresh_timer:
-                    self._refresh_timer.cancel()
-                self._refresh_timer = self._loop.call_later(
-                    ttl,
-                    lambda: self._spawn(self._refresh(attempt)),
-                )
+    async def _connected(self, connect: Dict[str, Any], attempt: int) -> None:
+        """Apply a successful connect reply."""
+        self._refresh_required = False
+        self.client_id = connect["client"]
+        self.state = ClientState.CONNECTED
+        self._send_pong = connect.get("pong", False)
+        self._ping_interval = connect.get("ping", 0)
+        if self._ping_interval > 0:
+            self._restart_ping_wait()
 
-            self._connected_future.set_result(True)
-
-            handler = self.events.on_connected
-            await handler(
-                ConnectedContext(
-                    client=connect.get("client"),
-                    version=connect.get("version", ""),
-                    data=self._decode_data(connect.get("data")),
-                ),
+        expires = connect.get("expires", False)
+        if expires:
+            ttl = connect["ttl"]
+            # Cancel existing refresh timer to prevent timer leaks
+            if self._refresh_timer:
+                self._refresh_timer.cancel()
+            self._refresh_timer = self._loop.call_later(
+                ttl,
+                lambda: self._spawn(self._refresh(attempt)),
             )
-            # The handler may have disconnected (or reconnected) the client.
-            if not self._connection_current(attempt):
-                return
 
-            self._clear_connecting_state()
+        self._connected_future.set_result(True)
 
-            for channel, sub in list(self._subs.items()):
-                if not sub or sub.state != SubscriptionState.SUBSCRIBING:
-                    continue
-                self._spawn(self._subscribe(channel))
+        handler = self.events.on_connected
+        await handler(
+            ConnectedContext(
+                client=connect.get("client"),
+                version=connect.get("version", ""),
+                data=self._decode_data(connect.get("data")),
+            ),
+        )
+        # The handler may have disconnected (or reconnected) the client.
+        if not self._connection_current(attempt):
+            return
 
-            await self._process_server_subs(connect.get("subs", {}), attempt)
+        self._clear_connecting_state()
+
+        for channel, sub in list(self._subs.items()):
+            if not sub or sub.state != SubscriptionState.SUBSCRIBING:
+                continue
+            self._spawn(self._subscribe(channel))
+
+        await self._process_server_subs(connect.get("subs", {}), attempt)
 
     async def _open_transport(self) -> "ClientConnection":
         # None, not an empty list, for JSON: websockets sends an empty
@@ -865,6 +893,15 @@ class Client:
         for channel in self._server_subs:
             handler = self.events.on_subscribing
             await handler(ServerSubscribingContext(channel=channel))
+
+    def set_token(self, token: str) -> None:
+        """Set the connection token for the next connect (e.g. a new one after
+        the old one expired, or "" on logout so that the next connect calls
+        get_token). Without get_token it also clears the "token expired" state,
+        so that set_token() + connect() works after it."""
+        self._token = token
+        if self._get_token is None:
+            self._refresh_required = False
 
     async def connect(self) -> None:
         """Initiate connection to server."""
@@ -1248,6 +1285,25 @@ class Client:
                     sub._epoch = ""
                     sub._prev_data = None
                     await sub._schedule_resubscribe()
+                    return False
+                if _is_token_expired(code) and sub._get_token is None:
+                    # The token expired and there is no get_token to get another
+                    # one: unauthorized, like a connection (instead of
+                    # subscribing again without a token, which the server denies).
+                    handler = sub.events.on_error
+                    await handler(
+                        SubscriptionErrorContext(
+                            code=_code_number(_ErrorCode.BAD_CONFIGURATION),
+                            error=CentrifugeError(
+                                "subscription token expired but no get_token function set"
+                            ),
+                        ),
+                    )
+                    if current():
+                        unauthorized = _UnsubscribedCode.UNAUTHORIZED
+                        await sub._move_unsubscribed(
+                            _code_number(unauthorized), _code_message(unauthorized)
+                        )
                     return False
                 if _is_token_expired(code):
                     temporary = True
@@ -1768,7 +1824,12 @@ class Client:
         self._process_messages_task = None
 
     def _invalidate_connection_state(self) -> None:
-        self._token = ""
+        # Without get_token there is no new token to get: keep the token the
+        # client has (or none) and reconnect with it - the server rejects it if
+        # it's no longer valid.
+        if self._get_token is not None:
+            self._token = ""
+            self._refresh_required = True
         for sub in self._subs.values():
             sub._invalidate_state()
         for server_sub in self._server_subs.values():
@@ -2426,8 +2487,11 @@ class Subscription:
         # subscription resubscribes with was_recovering=True, recovered=False —
         # letting the app reload via its existing recovery-failure path — while a
         # non-recoverable one just resubscribes (the sentinel is not sent). The
-        # real epoch/offset are adopted from the subscribe reply.
-        self._token = ""
+        # real epoch/offset are adopted from the subscribe reply. Without get_token
+        # there is no new token to get: a static token is kept (the server
+        # rejects it if it's no longer valid).
+        if self._get_token is not None:
+            self._token = ""
         self._offset = 0
         self._epoch = "_"
         self._prev_data = None
