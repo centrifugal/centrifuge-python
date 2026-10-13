@@ -114,6 +114,38 @@ def _task_cancelling() -> bool:
     return bool(cancelling and cancelling() > 0)
 
 
+# How long a timeout that fires late (the process was suspended) waits for what
+# arrived meanwhile. See _TimeoutTimer.
+_LATE_TIMER_GRACE = 1.0
+
+
+class _TimeoutTimer:
+    """A loop.call_later() for timeouts. A timer that fires much later than
+    scheduled means the process was suspended (frozen in the background, stopped
+    in a debugger): replies and pings that arrived meanwhile may still be waiting
+    in the socket, so the callback runs after a short grace period instead,
+    letting them be handled first."""
+
+    def __init__(self, loop: "AbstractEventLoop", delay: float, callback: Callable[[], Any]):
+        self._loop = loop
+        self._callback = callback
+        self._deadline = loop.time() + delay
+        self._handle = loop.call_later(delay, self._fire)
+
+    def _fire(self) -> None:
+        if self._loop.time() - self._deadline > _LATE_TIMER_GRACE:
+            self._deadline = float("inf")
+            self._handle = self._loop.call_later(_LATE_TIMER_GRACE, self._callback)
+            return
+        self._callback()
+
+    def cancel(self) -> None:
+        self._handle.cancel()
+
+    def cancelled(self) -> bool:
+        return self._handle.cancelled()
+
+
 _REFRESH_RETRY_MIN_DELAY = 5.0
 _REFRESH_RETRY_MAX_DELAY = 10.0
 _SUB_REFRESH_RETRY_MIN_DELAY = 10.0
@@ -207,7 +239,7 @@ class SubscriptionState(Enum):
 class _Callback:
     future: asyncio.Future
     done: Optional[asyncio.Future]
-    timeout: Optional[asyncio.TimerHandle]
+    timeout: Optional[_TimeoutTimer]
 
 
 @dataclass
@@ -1498,7 +1530,7 @@ class Client:
                 if not future.done():
                     self._future_error(cmd_id, OperationTimeoutError())
 
-            th = self._loop.call_later(timeout, cb)
+            th = _TimeoutTimer(self._loop, timeout, cb)
 
         self._inflight_commands[cmd_id] = _Callback(
             future=future,
@@ -1525,7 +1557,7 @@ class Client:
                 if not future.done():
                     self._future_error(cmd_id, OperationTimeoutError())
 
-            th = self._loop.call_later(self._timeout, cb)
+            th = _TimeoutTimer(self._loop, self._timeout, cb)
 
         cb = _Callback(
             future=future,
@@ -1865,7 +1897,8 @@ class Client:
     def _restart_ping_wait(self) -> None:
         if self._ping_timer:
             self._ping_timer.cancel()
-        self._ping_timer = self._loop.call_later(
+        self._ping_timer = _TimeoutTimer(
+            self._loop,
             self._ping_interval + self._max_server_ping_delay,
             lambda: self._spawn(self._no_ping()),
         )
