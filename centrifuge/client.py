@@ -2005,6 +2005,32 @@ class Client:
                 handler = self.events.on_unsubscribed
                 await handler(ServerUnsubscribedContext(channel=channel))
 
+    async def _process_subscribe(self, channel: str, subscribe: Dict[str, Any]) -> None:
+        # A server-side subscription added while connected (e.g. with the server
+        # API's subscribe): from now on its publications come with the channel.
+        recoverable = subscribe.get("recoverable", False)
+        positioned = subscribe.get("positioned", False)
+        offset = int(subscribe.get("offset", 0))
+        epoch = subscribe.get("epoch", "")
+        self._server_subs[channel] = _ServerSubscription(
+            offset=offset, epoch=epoch, recoverable=recoverable
+        )
+        stream_position = None
+        if positioned or recoverable:
+            stream_position = StreamPosition(offset=offset, epoch=epoch)
+        handler = self.events.on_subscribed
+        await handler(
+            ServerSubscribedContext(
+                channel=channel,
+                recoverable=recoverable,
+                positioned=positioned,
+                stream_position=stream_position,
+                was_recovering=False,
+                recovered=False,
+                data=self._decode_data(subscribe.get("data")),
+            ),
+        )
+
     async def _process_disconnect(self, disconnect: Dict[str, Any]) -> None:
         logger.debug("disconnect push received")
         code = disconnect["code"]
@@ -2029,6 +2055,8 @@ class Client:
                 await self._process_leave(push.get("channel", ""), push["leave"], push_id)
             elif "unsubscribe" in push:
                 await self._process_unsubscribe(push["channel"], push["unsubscribe"])
+            elif "subscribe" in push:
+                await self._process_subscribe(push["channel"], push["subscribe"])
             elif "disconnect" in push:
                 await self._process_disconnect(push["disconnect"])
             else:

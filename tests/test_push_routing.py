@@ -139,3 +139,28 @@ class TestPushRouting(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await wait_until(lambda: self.client.state == ClientState.DISCONNECTED))
         await asyncio.sleep(0.2)
         self.assertEqual(self.publications, [])
+
+    async def test_server_side_subscription_added_while_connected(self):
+        subscribed = []
+        server_publications = []
+
+        async def on_subscribed(ctx):
+            subscribed.append(ctx.channel)
+
+        async def on_server_publication(ctx):
+            server_publications.append((ctx.channel, ctx.pub.data))
+
+        self.client.events.on_subscribed = on_subscribed
+        self.client.events.on_publication = on_server_publication
+        await self.client.connect()
+        await self.client.ready()
+
+        # The server subscribes the connection to a channel (server API).
+        push = protocol.Push(channel="dyn")
+        push.subscribe.recoverable = True
+        push.subscribe.epoch = "e"
+        await self.server.send_push(push)
+        await self.server.publish(b"1", channel="dyn")
+
+        self.assertTrue(await wait_until(lambda: server_publications == [("dyn", b"1")]))
+        self.assertEqual(subscribed, ["dyn"])
