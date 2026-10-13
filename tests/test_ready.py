@@ -3,7 +3,11 @@ import unittest
 
 from centrifuge import Client
 from centrifuge.client import ClientState
-from centrifuge.exceptions import ClientDisconnectedError, OperationTimeoutError
+from centrifuge.exceptions import (
+    ClientDisconnectedError,
+    OperationTimeoutError,
+    SubscriptionUnsubscribedError,
+)
 
 # ready() (and therefore publish/history/presence/rpc, which all call it first)
 # is meant to tolerate a client that is mid-reconnect: it should wait up to
@@ -36,6 +40,24 @@ class TestClientReady(unittest.IsolatedAsyncioTestCase):
         self.client.state = ClientState.DISCONNECTED
         with self.assertRaises(ClientDisconnectedError):  # noqa: PT027
             await self.client.ready(timeout=1)
+
+    async def test_ready_raises_when_disconnect_ends_the_wait(self):
+        self.client.state = ClientState.CONNECTING
+        task = asyncio.ensure_future(self.client.ready(timeout=1))
+        await asyncio.sleep(0)
+        await self.client.disconnect()
+        # It used to return normally, as if the client were connected.
+        with self.assertRaises(ClientDisconnectedError):  # noqa: PT027
+            await task
+
+    async def test_subscription_ready_raises_when_unsubscribe_ends_the_wait(self):
+        sub = self.client.new_subscription("ch")
+        await sub.subscribe()
+        task = asyncio.ensure_future(sub.ready(timeout=1))
+        await asyncio.sleep(0)
+        await sub.unsubscribe()
+        with self.assertRaises(SubscriptionUnsubscribedError):  # noqa: PT027
+            await task
 
 
 if __name__ == "__main__":

@@ -1680,12 +1680,12 @@ class Client:
 
     async def ready(self, timeout: Optional[float] = None) -> None:
         self._check_state()
-        completed = await _wait_for_future(
-            self._connected_future,
-            timeout=timeout or self._timeout,
-        )
+        future = self._connected_future
+        completed = await _wait_for_future(future, timeout=timeout or self._timeout)
         if not completed:
             raise OperationTimeoutError("timeout waiting for connection to be ready")
+        # Raises when the wait ended with disconnect().
+        future.result()
 
     async def publish(
         self,
@@ -2319,12 +2319,12 @@ class Subscription:
 
     async def ready(self, timeout: Optional[float] = None) -> None:
         self._check_state()
-        completed = await _wait_for_future(
-            self._subscribed_future,
-            timeout=timeout or self._client._timeout,
-        )
+        future = self._subscribed_future
+        completed = await _wait_for_future(future, timeout=timeout or self._client._timeout)
         if not completed:
             raise OperationTimeoutError("timeout waiting for subscription to be ready")
+        # Raises when the wait ended with unsubscribe.
+        future.result()
 
     async def history(
         self,
