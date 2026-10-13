@@ -108,7 +108,8 @@ The fact WebSocket read is blocked for the time we execute callbacks means that 
 Callbacks are awaited as part of the SDK's own flow, so handle errors inside the callback. An exception escaping a callback is logged through the SDK's `centrifuge` logger, and:
 
 * when it escapes while the client handles a message from the server (a publication, a reply, `on_connected`, `on_subscribed`, ...), the client can't know what was applied: it disconnects with code `2` ("bad protocol"), as centrifuge-js does. Call `connect()` to start again;
-* when it escapes while a connection or subscription attempt is in progress (for example from `on_error` reporting a failed attempt), the attempt is retried with backoff.
+* when it escapes while a connection or subscription attempt is in progress (for example from `on_error` reporting a failed attempt), the attempt is retried with backoff;
+* when it escapes from a callback of a lost connection (`on_connecting`, `on_subscribing`, `on_disconnected`), the client completes the disconnect and reconnects as usual.
 
 Keep an eye on error logs.
 

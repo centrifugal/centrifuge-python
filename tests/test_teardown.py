@@ -224,6 +224,75 @@ class TestAbandonedAttempt(unittest.IsolatedAsyncioTestCase):
         await client.disconnect()
 
 
+class TestTeardownWithRaisingHandlers(unittest.IsolatedAsyncioTestCase):
+    """A teardown completes - and reconnects - whatever its event handlers do."""
+
+    async def asyncSetUp(self):
+        self.server = FakeCentrifugoServer()
+        await self.server.start()
+        self.client = make_client(self.server.url)
+
+    async def asyncTearDown(self):
+        await self.client.disconnect()
+        await self.server.stop()
+
+    async def test_raising_connecting_handler(self):
+        async def on_connecting(ctx):
+            if ctx.code != 0:
+                raise RuntimeError("app bug")
+
+        self.client.events.on_connecting = on_connecting
+        await self.client.connect()
+        await self.client.ready()
+        with self.assertLogs("centrifuge", level="ERROR"):
+            await self.server.close_connection()
+            self.assertTrue(await wait_until(lambda: len(connect_commands(self.server)) == 2))
+        self.assertTrue(await wait_until(lambda: self.client.state == ClientState.CONNECTED))
+
+    async def test_raising_subscribing_handler(self):
+        sub = self.client.new_subscription("ch")
+
+        async def on_subscribing(ctx):
+            if ctx.code != 0:
+                raise RuntimeError("app bug")
+
+        sub.events.on_subscribing = on_subscribing
+        await self.client.connect()
+        await sub.subscribe()
+        await sub.ready()
+        with self.assertLogs("centrifuge", level="ERROR"):
+            await self.server.close_connection()
+            self.assertTrue(await wait_until(lambda: len(connect_commands(self.server)) == 2))
+        self.assertTrue(await wait_until(lambda: sub.state == SubscriptionState.SUBSCRIBED))
+
+    async def test_new_subscription_from_subscribing_handler(self):
+        sub = self.client.new_subscription("ch")
+        created = []
+
+        async def on_subscribing(ctx):
+            if ctx.code != 0 and not created:
+                other = self.client.new_subscription("other")
+                created.append(other)
+                await other.subscribe()
+
+        sub.events.on_subscribing = on_subscribing
+        await self.client.connect()
+        await sub.subscribe()
+        await sub.ready()
+        await self.server.close_connection()
+        # It used to fail with "dictionary changed size during iteration" and
+        # leave the client connecting.
+        self.assertTrue(await wait_until(lambda: self.client.state == ClientState.CONNECTED))
+        self.assertTrue(
+            await wait_until(
+                lambda: (
+                    sub.state == SubscriptionState.SUBSCRIBED
+                    and created[0].state == SubscriptionState.SUBSCRIBED
+                )
+            )
+        )
+
+
 class TestCancelledConnect(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.server = FakeCentrifugoServer()

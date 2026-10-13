@@ -947,7 +947,8 @@ class Client:
         # _push_id is left as-is: the next subscribe reply re-registers it
         # regardless of whether the server reuses the same ID.
         self._subs_by_id.clear()
-        for sub in self._subs.values():
+        # Copies: event handlers may create or remove subscriptions meanwhile.
+        for sub in list(self._subs.values()):
             if sub.state == SubscriptionState.SUBSCRIBED:
                 unsubscribe_code = _SubscribingCode.TRANSPORT_CLOSED
                 await sub._move_subscribing(
@@ -956,7 +957,7 @@ class Client:
                     skip_schedule_resubscribe=True,
                 )
 
-        for channel in self._server_subs:
+        for channel in list(self._server_subs):
             handler = self.events.on_subscribing
             await handler(ServerSubscribingContext(channel=channel))
 
@@ -1883,7 +1884,13 @@ class Client:
             self._connected_future.exception()
 
         if previous_state == ClientState.CONNECTED:
-            await self._clear_connected_state()
+            try:
+                await self._clear_connected_state()
+            except Exception:
+                # An event handler raised: the teardown must still complete (and
+                # reconnect), or the client is left connecting with nothing
+                # scheduled.
+                logger.exception("exception in event handler during disconnect")
             if self._transition != transition:
                 return
 
@@ -1891,17 +1898,25 @@ class Client:
         # going to reconnect moves to connecting (with the reason); disconnected
         # is only for disconnect() and terminal codes. A failed attempt that
         # retries stays connecting, without an event.
+        try:
+            await self._emit_teardown_event(code, reason, reconnect, previous_state)
+        except Exception:
+            logger.exception("exception in event handler during disconnect")
+        if self._transition != transition:
+            return
+
+        if reconnect:
+            await self._schedule_reconnect()
+
+    async def _emit_teardown_event(
+        self, code: int, reason: str, reconnect: bool, previous_state: ClientState
+    ) -> None:
         if not reconnect:
             handler = self.events.on_disconnected
             await handler(DisconnectedContext(code=code, reason=reason))
         elif previous_state == ClientState.CONNECTED:
             handler = self.events.on_connecting
             await handler(ConnectingContext(code=code, reason=reason))
-        if self._transition != transition:
-            return
-
-        if reconnect:
-            await self._schedule_reconnect()
 
     def _stop_transport_tasks(self) -> None:
         # The reader is cancelled - unless the teardown runs in it (a close
