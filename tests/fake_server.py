@@ -235,6 +235,23 @@ class FakeCentrifugoServer:
         """Send a raw reply to the active connection."""
         await self._send(self._current_ws, reply)
 
+    async def send_replies(self, replies):
+        """Send several raw replies to the active connection in one WebSocket
+        message (a frame the client processes reply by reply)."""
+        if not self._use_protobuf:
+            lines = []
+            for reply in replies:
+                obj = MessageToDict(reply, preserving_proto_field_name=True)
+                _map_bytes_fields(protocol.Reply.DESCRIPTOR, obj, _base64_to_json)
+                lines.append(json.dumps(obj))
+            await self._current_ws.send("\n".join(lines))
+            return
+        data = b""
+        for reply in replies:
+            raw = reply.SerializeToString()
+            data += _varint_encode(len(raw)) + raw
+        await self._current_ws.send(data)
+
     async def send_push(self, push):
         """Send a raw push (wrapped in a reply) to the active connection."""
         reply = protocol.Reply()
