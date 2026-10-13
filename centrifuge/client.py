@@ -941,25 +941,41 @@ class Client:
             self._reconnect_timer.cancel()
             self._reconnect_timer = None
 
-    async def _clear_connected_state(self) -> None:
+    async def _clear_connected_state(self, transition: int) -> None:
         # Channel compaction IDs are scoped to a server session — drop the routing
         # registry; each resubscribe re-registers a fresh ID. The per-subscription
         # _push_id is left as-is: the next subscribe reply re-registers it
         # regardless of whether the server reuses the same ID.
         self._subs_by_id.clear()
-        # Copies: event handlers may create or remove subscriptions meanwhile.
-        for sub in list(self._subs.values()):
-            if sub.state == SubscriptionState.SUBSCRIBED:
-                unsubscribe_code = _SubscribingCode.TRANSPORT_CLOSED
-                await sub._move_subscribing(
-                    code=_code_number(unsubscribe_code),
-                    reason=_code_message(unsubscribe_code),
-                    skip_schedule_resubscribe=True,
+        # Every subscribed subscription moves to subscribing first, before any
+        # event: whatever a handler does then (raise, disconnect, connect again),
+        # no subscription is left subscribed without a connection - the next
+        # connect resubscribes them all - and each still gets its event. Copies:
+        # handlers may create or remove subscriptions meanwhile.
+        moved = [
+            (sub, sub._attempt) for sub in list(self._subs.values()) if sub._enter_subscribing()
+        ]
+        code = _SubscribingCode.TRANSPORT_CLOSED
+        for sub, attempt in moved:
+            # Only while the subscription is still where this teardown moved it:
+            # a handler may have unsubscribed it, or the client connected again
+            # and resubscribed it meanwhile.
+            if sub._attempt != attempt or sub.state != SubscriptionState.SUBSCRIBING:
+                continue
+            try:
+                await sub.events.on_subscribing(
+                    SubscribingContext(code=_code_number(code), reason=_code_message(code))
                 )
+            except Exception:
+                logger.exception("exception in on_subscribing handler")
 
         for channel in list(self._server_subs):
-            handler = self.events.on_subscribing
-            await handler(ServerSubscribingContext(channel=channel))
+            if self._transition != transition:
+                return
+            try:
+                await self.events.on_subscribing(ServerSubscribingContext(channel=channel))
+            except Exception:
+                logger.exception("exception in on_subscribing handler")
 
     def set_token(self, token: str) -> None:
         """Set the connection token for the next connect (e.g. a new one after
@@ -1902,7 +1918,7 @@ class Client:
 
         if previous_state == ClientState.CONNECTED:
             try:
-                await self._clear_connected_state()
+                await self._clear_connected_state(transition)
             except Exception:
                 # An event handler raised: the teardown must still complete (and
                 # reconnect), or the client is left connecting with nothing
@@ -2498,6 +2514,19 @@ class Subscription:
         with contextlib.suppress(CentrifugeError):
             await self._subscribed_future
 
+    def _enter_subscribing(self) -> bool:
+        """Move a subscribed subscription to subscribing, without events. Returns
+        whether it moved."""
+        if self.state != SubscriptionState.SUBSCRIBED:
+            return False
+        self._clear_subscribed_state()
+        self._commit_pending()
+        self.state = SubscriptionState.SUBSCRIBING
+        self._attempt += 1
+        if self._subscribed_future.done():
+            self._subscribed_future = asyncio.Future()
+        return True
+
     async def _move_subscribing(
         self,
         code: int,
@@ -2508,13 +2537,12 @@ class Subscription:
             return
 
         if self.state == SubscriptionState.SUBSCRIBED:
-            self._clear_subscribed_state()
-            self._commit_pending()
-
-        self.state = SubscriptionState.SUBSCRIBING
-        self._attempt += 1
-        if self._subscribed_future.done():
-            self._subscribed_future = asyncio.Future()
+            self._enter_subscribing()
+        else:
+            self.state = SubscriptionState.SUBSCRIBING
+            self._attempt += 1
+            if self._subscribed_future.done():
+                self._subscribed_future = asyncio.Future()
 
         handler = self.events.on_subscribing
         await handler(

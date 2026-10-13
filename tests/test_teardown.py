@@ -293,6 +293,121 @@ class TestTeardownWithRaisingHandlers(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class TestSupersededTeardown(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.server = FakeCentrifugoServer()
+        await self.server.start()
+        self.client = make_client(self.server.url)
+
+    async def asyncTearDown(self):
+        await self.client.disconnect()
+        await self.server.stop()
+
+    async def test_slow_teardown_handler_does_not_touch_the_next_connection(self):
+        first = self.client.new_subscription("ch0")
+        second = self.client.new_subscription("ch1")
+        slow = []
+
+        async def on_subscribing(ctx):
+            if ctx.code != 0 and not slow:
+                slow.append(1)
+                await asyncio.sleep(0.2)  # the app reconnects meanwhile
+
+        first.events.on_subscribing = on_subscribing
+        await self.client.connect()
+        await first.subscribe()
+        await second.subscribe()
+        await second.ready()
+
+        await self.server.close_connection()
+        self.assertTrue(await wait_until(lambda: slow))
+        await self.client.disconnect()
+        await self.client.connect()
+        await asyncio.sleep(0.6)
+
+        # The old teardown, resumed after the handler, used to move the second
+        # subscription (subscribed again by then) to subscribing for good.
+        self.assertEqual(self.client.state, ClientState.CONNECTED)
+        self.assertEqual(first.state, SubscriptionState.SUBSCRIBED)
+        self.assertEqual(second.state, SubscriptionState.SUBSCRIBED)
+
+
+class TestTeardownHandlersSeeConsistentState(unittest.IsolatedAsyncioTestCase):
+    """Whatever an on_subscribing handler of a teardown does, no subscription is
+    left subscribed without a connection: the next connect resubscribes all."""
+
+    async def asyncSetUp(self):
+        self.server = FakeCentrifugoServer()
+        await self.server.start()
+        self.client = make_client(self.server.url)
+        self.first = self.client.new_subscription("a")
+        self.second = self.client.new_subscription("b")
+
+    async def asyncTearDown(self):
+        await self.client.disconnect()
+        await self.server.stop()
+
+    async def _subscribe_both(self):
+        await self.client.connect()
+        await self.first.subscribe()
+        await self.second.subscribe()
+        await self.first.ready()
+        await self.second.ready()
+
+    def _subscribes_on_connection(self, n):
+        # Channels subscribed after the n-th connect command.
+        connects = 0
+        channels = []
+        for cmd in self.server.received:
+            if cmd.HasField("connect"):
+                connects += 1
+            elif cmd.HasField("subscribe") and connects == n:
+                channels.append(cmd.subscribe.channel)
+        return sorted(channels)
+
+    async def test_disconnect_from_subscribing_handler(self):
+        async def on_subscribing(ctx):
+            if ctx.code != 0:
+                await self.client.disconnect()
+
+        second_events = []
+
+        async def second_subscribing(ctx):
+            second_events.append(ctx.code)
+
+        self.first.events.on_subscribing = on_subscribing
+        self.second.events.on_subscribing = second_subscribing
+        await self._subscribe_both()
+        await self.server.close_connection()
+        self.assertTrue(await wait_until(lambda: self.client.state == ClientState.DISCONNECTED))
+        self.assertEqual(self.second.state, SubscriptionState.SUBSCRIBING)
+        # It still gets its event.
+        self.assertTrue(await wait_until(lambda: second_events[-1:] == [1]))
+
+        self.first.events.on_subscribing = SubscribingOk.on_subscribing
+        await self.client.connect()
+        self.assertTrue(await wait_until(lambda: self._subscribes_on_connection(2) == ["a", "b"]))
+
+    async def test_raising_subscribing_handler_of_one_subscription(self):
+        async def on_subscribing(ctx):
+            if ctx.code != 0:
+                raise RuntimeError("app bug")
+
+        self.first.events.on_subscribing = on_subscribing
+        await self._subscribe_both()
+        with self.assertLogs("centrifuge", level="ERROR"):
+            await self.server.close_connection()
+            self.assertTrue(
+                await wait_until(lambda: self._subscribes_on_connection(2) == ["a", "b"])
+            )
+
+
+class SubscribingOk:
+    @staticmethod
+    async def on_subscribing(_ctx):
+        return None
+
+
 class TestCancelledConnect(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.server = FakeCentrifugoServer()
