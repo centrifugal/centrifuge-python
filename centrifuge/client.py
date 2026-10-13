@@ -272,7 +272,6 @@ class Client:
         self._subs: Dict[str, Subscription] = {}
         self._messages: asyncio.Queue = asyncio.Queue()
         self._delay: float = 0
-        self._need_reconnect: bool = True
         self._name: str = name
         self._version: str = version
         self._data: Any = data
@@ -463,14 +462,14 @@ class Client:
             await self._conn.close()
 
     async def _schedule_reconnect(self) -> None:
-        if self.state == ClientState.CONNECTED:
+        # Only a client that is connecting reconnects: after disconnect() or a
+        # terminal disconnect the state is DISCONNECTED, and a later connect()
+        # makes it CONNECTING again - so reconnects work after it too.
+        if self.state != ClientState.CONNECTING:
+            logger.debug("won't reconnect")
             return
 
         if self._conn and self._conn.state == State.OPEN:
-            return
-
-        if not self._need_reconnect:
-            logger.debug("won't reconnect")
             return
 
         # Cancel existing reconnect timer to prevent timer leaks and duplicate scheduling
@@ -478,8 +477,6 @@ class Client:
             logger.debug("canceling existing reconnect timer")
             self._reconnect_timer.cancel()
             self._reconnect_timer = None
-
-        self.state = ClientState.CONNECTING
 
         delay = _backoff(
             self._reconnect_attempts,
@@ -1587,9 +1584,6 @@ class Client:
         # reads from this queue anymore - replace it (instead of just leaving it) to
         # drop any messages received but not yet processed on the old connection.
         self._messages = asyncio.Queue()
-
-        if not reconnect:
-            self._need_reconnect = False
 
         if self.state == ClientState.DISCONNECTED:
             return

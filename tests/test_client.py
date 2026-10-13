@@ -1135,9 +1135,9 @@ class TestConnectionLeak(unittest.IsolatedAsyncioTestCase):
         client._loop.call_later = tracking_call_later
 
         try:
-            # Set up client state to allow reconnect scheduling
-            client.state = centrifuge.client.ClientState.DISCONNECTED
-            client._need_reconnect = True
+            # Set up client state to allow reconnect scheduling: only a connecting
+            # client reconnects.
+            client.state = centrifuge.client.ClientState.CONNECTING
 
             # Call _schedule_reconnect() multiple times rapidly
             await client._schedule_reconnect()
