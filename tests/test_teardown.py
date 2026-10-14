@@ -225,7 +225,8 @@ class TestAbandonedAttempt(unittest.IsolatedAsyncioTestCase):
 
 
 class TestTeardownWithRaisingHandlers(unittest.IsolatedAsyncioTestCase):
-    """A teardown completes - and reconnects - whatever its event handlers do."""
+    """A teardown completes whatever its event handlers do. A handler that raises
+    stops the client (bad protocol, no reconnect): it connects again when asked."""
 
     async def asyncSetUp(self):
         self.server = FakeCentrifugoServer()
@@ -244,9 +245,14 @@ class TestTeardownWithRaisingHandlers(unittest.IsolatedAsyncioTestCase):
         self.client.events.on_connecting = on_connecting
         await self.client.connect()
         await self.client.ready()
-        with self.assertLogs("centrifuge", level="ERROR"):
-            await self.server.close_connection()
-            self.assertTrue(await wait_until(lambda: len(connect_commands(self.server)) == 2))
+        asyncio.get_running_loop().set_exception_handler(lambda _loop, _ctx: None)
+        await self.server.close_connection()
+        self.assertTrue(await wait_until(lambda: self.client.state == ClientState.DISCONNECTED))
+        await asyncio.sleep(0.2)
+        self.assertEqual(len(connect_commands(self.server)), 1)
+
+        self.client.events.on_connecting = ConnectingOk.on_connecting
+        await self.client.connect()
         self.assertTrue(await wait_until(lambda: self.client.state == ClientState.CONNECTED))
 
     async def test_raising_subscribing_handler(self):
@@ -260,9 +266,13 @@ class TestTeardownWithRaisingHandlers(unittest.IsolatedAsyncioTestCase):
         await self.client.connect()
         await sub.subscribe()
         await sub.ready()
-        with self.assertLogs("centrifuge", level="ERROR"):
-            await self.server.close_connection()
-            self.assertTrue(await wait_until(lambda: len(connect_commands(self.server)) == 2))
+        asyncio.get_running_loop().set_exception_handler(lambda _loop, _ctx: None)
+        await self.server.close_connection()
+        self.assertTrue(await wait_until(lambda: self.client.state == ClientState.DISCONNECTED))
+        self.assertEqual(sub.state, SubscriptionState.SUBSCRIBING)
+
+        sub.events.on_subscribing = SubscribingOk.on_subscribing
+        await self.client.connect()
         self.assertTrue(await wait_until(lambda: sub.state == SubscriptionState.SUBSCRIBED))
 
     async def test_new_subscription_from_subscribing_handler(self):
@@ -395,11 +405,22 @@ class TestTeardownHandlersSeeConsistentState(unittest.IsolatedAsyncioTestCase):
 
         self.first.events.on_subscribing = on_subscribing
         await self._subscribe_both()
-        with self.assertLogs("centrifuge", level="ERROR"):
-            await self.server.close_connection()
-            self.assertTrue(
-                await wait_until(lambda: self._subscribes_on_connection(2) == ["a", "b"])
-            )
+        asyncio.get_running_loop().set_exception_handler(lambda _loop, _ctx: None)
+        await self.server.close_connection()
+        # The raise stopped the client; both subscriptions wait for the next connect.
+        self.assertTrue(await wait_until(lambda: self.client.state == ClientState.DISCONNECTED))
+        self.assertEqual(self.first.state, SubscriptionState.SUBSCRIBING)
+        self.assertEqual(self.second.state, SubscriptionState.SUBSCRIBING)
+
+        self.first.events.on_subscribing = SubscribingOk.on_subscribing
+        await self.client.connect()
+        self.assertTrue(await wait_until(lambda: self._subscribes_on_connection(2) == ["a", "b"]))
+
+
+class ConnectingOk:
+    @staticmethod
+    async def on_connecting(_ctx):
+        return None
 
 
 class SubscribingOk:

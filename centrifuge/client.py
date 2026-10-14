@@ -120,6 +120,47 @@ def _task_cancelling() -> bool:
 _LATE_TIMER_GRACE = 1.0
 
 
+class _GuardedEvents:
+    """Calls the event handlers of the app (looked up when called, so a handler
+    replaced on the handler object is the one called). An exception escaping a
+    handler doesn't reach the SDK's own code: it is reported, and the client stops
+    (see Client._handler_raised); the SDK goes on as if the handler had returned."""
+
+    def __init__(
+        self,
+        events: Callable[[], Any],
+        client: Callable[[], Optional["Client"]],
+        publication_failed: Callable[[Any], None],
+    ) -> None:
+        self._events = events
+        self._client = client
+        self._publication_failed = publication_failed
+
+    def __getattr__(self, name: str) -> Callable[..., Awaitable[Any]]:
+        handler = getattr(self._events(), name)
+
+        async def call(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return await handler(*args, **kwargs)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                if name == "on_publication" and args:
+                    # Not delivered: the teardown that follows must not count it.
+                    self._publication_failed(args[0])
+                client = self._client()
+                if client is not None:
+                    await client._handler_raised(e)
+                else:
+                    asyncio.get_running_loop().call_exception_handler({
+                        "message": "exception in a centrifuge event handler",
+                        "exception": e,
+                    })
+                return None
+
+        return call
+
+
 class _TimeoutTimer:
     """A loop.call_later() for timeouts. A timer that fires much later than
     scheduled means the process was suspended (frozen in the background, stopped
@@ -343,6 +384,10 @@ class Client:
         self.__connected_future: Optional[asyncio.Future] = None
         self._token = token
         self._get_token = get_token
+        self._handler_failures = 0
+        self._ev = _GuardedEvents(
+            lambda: self.events, lambda: self, self._server_publication_failed
+        )
         # Set when the server answered "token expired" (109): the next attempt gets
         # a new token from get_token - or, without one, stops as unauthorized.
         self._refresh_required = False
@@ -592,6 +637,27 @@ class Client:
             logger.exception("exception during connection attempt")
             await self._handler_failed(attempt, e)
 
+    async def _handler_raised(self, e: Exception) -> None:
+        """An exception escaping an event handler of the app. The SDK can't know
+        what the handler left undone, so it fails loudly instead of going on as if
+        nothing happened, as centrifuge-js does: the exception is re-raised to the
+        event loop's exception handler, and the client disconnects with "bad
+        protocol" and doesn't reconnect. Its own processing goes on as if the
+        handler had returned, as for a handler calling disconnect()."""
+        self._handler_failures += 1
+        asyncio.get_running_loop().call_exception_handler({
+            "message": "exception in a centrifuge event handler",
+            "exception": e,
+        })
+        if self.state != ClientState.DISCONNECTED:
+            code = _DisconnectedCode.BAD_PROTOCOL
+            await self._disconnect(_code_number(code), f"exception in event handler: {e}", False)
+
+    def _server_publication_failed(self, ctx: Any) -> None:
+        channel = getattr(ctx, "channel", None)
+        if channel is not None:
+            self._server_pending.pop(channel, None)
+
     async def _handler_failed(self, attempt: int, e: Exception) -> None:
         if self._attempt_current(attempt):
             # Still connecting: retry with backoff.
@@ -621,7 +687,7 @@ class Client:
 
         if self._refresh_required and self._get_token is None:
             # The token expired and there is nothing to get a new one with.
-            handler = self.events.on_error
+            handler = self._ev.on_error
             await handler(
                 ErrorContext(
                     code=_code_number(_ErrorCode.BAD_CONFIGURATION),
@@ -671,7 +737,7 @@ class Client:
                 self._open_task = None
             if not self._attempt_current(attempt):
                 return
-            handler = self.events.on_error
+            handler = self._ev.on_error
             await handler(ErrorContext(code=_code_number(_ErrorCode.TRANSPORT_CLOSED), error=e))
             if self._attempt_current(attempt):
                 await self._schedule_reconnect()
@@ -703,14 +769,14 @@ class Client:
             except OperationTimeoutError as e:
                 if not self._attempt_current(attempt):
                     return
-                handler = self.events.on_error
+                handler = self._ev.on_error
                 await handler(ErrorContext(code=_code_number(_ErrorCode.TIMEOUT), error=e))
                 await self._fail_connection_attempt(attempt)
                 return
             except Exception as e:
                 if not self._attempt_current(attempt):
                     return
-                handler = self.events.on_error
+                handler = self._ev.on_error
                 await handler(
                     ErrorContext(code=_code_number(_ErrorCode.CONNECT_ERROR), error=e),
                 )
@@ -731,7 +797,7 @@ class Client:
                     if sent_token == self._token:
                         self._refresh_required = True
                 if temporary:
-                    handler = self.events.on_error
+                    handler = self._ev.on_error
                     await handler(
                         ErrorContext(
                             code=_code_number(_ErrorCode.CONNECT_ERROR),
@@ -768,7 +834,7 @@ class Client:
 
         self._connected_future.set_result(True)
 
-        handler = self.events.on_connected
+        handler = self._ev.on_connected
         await handler(
             ConnectedContext(
                 client=connect.get("client"),
@@ -829,7 +895,7 @@ class Client:
             code = _DisconnectedCode.UNAUTHORIZED
             await self._disconnect(_code_number(code), _code_message(code), False)
             return
-        handler = self.events.on_error
+        handler = self._ev.on_error
         await handler(
             ErrorContext(code=_code_number(_ErrorCode.CLIENT_CONNECT_TOKEN), error=e),
         )
@@ -896,7 +962,7 @@ class Client:
                     epoch=subscribe.get("epoch", ""),
                 )
 
-            handler = self.events.on_subscribed
+            handler = self._ev.on_subscribed
             await handler(
                 ServerSubscribedContext(
                     channel=channel,
@@ -924,7 +990,7 @@ class Client:
         for channel in channels_to_delete:
             if not self._connection_current(attempt):
                 return
-            handler = self.events.on_unsubscribed
+            handler = self._ev.on_unsubscribed
             await handler(ServerUnsubscribedContext(channel=channel))
 
     async def _process_server_publication(self, channel: str, pub: Any):
@@ -932,13 +998,18 @@ class Client:
         connection = self._transport_id
         if publication.offset > 0:
             self._server_pending[channel] = (connection, publication.offset)
+        failures = self._handler_failures
         try:
-            await self.events.on_publication(
+            await self._ev.on_publication(
                 ServerPublicationContext(channel=channel, pub=publication)
             )
         finally:
             if self._server_pending.get(channel, (None,))[0] == connection:
                 del self._server_pending[channel]
+        if self._handler_failures != failures:
+            # The handler raised: the publication isn't delivered, the position
+            # stays before it and the client stopped.
+            return
         # A handler that finishes after its connection was lost (handlers aren't
         # cancelled) must not move the position the next connection recovers
         # from, possibly back.
@@ -975,7 +1046,7 @@ class Client:
             if sub._attempt != attempt or sub.state != SubscriptionState.SUBSCRIBING:
                 continue
             try:
-                await sub.events.on_subscribing(
+                await sub._ev.on_subscribing(
                     SubscribingContext(code=_code_number(code), reason=_code_message(code))
                 )
             except Exception:
@@ -985,7 +1056,7 @@ class Client:
             if self._transition != transition:
                 return
             try:
-                await self.events.on_subscribing(ServerSubscribingContext(channel=channel))
+                await self._ev.on_subscribing(ServerSubscribingContext(channel=channel))
             except Exception:
                 logger.exception("exception in on_subscribing handler")
 
@@ -1011,17 +1082,10 @@ class Client:
             self._connected_future = asyncio.Future()
 
         code = _ConnectingCode.CONNECT_CALLED
-        try:
-            await self.events.on_connecting(
-                ConnectingContext(code=_code_number(code), reason=_code_message(code))
-            )
-        except Exception:
-            # As in centrifuge-js: the attempt starts all the same - the client
-            # must not stay connecting with nothing in progress - and the
-            # exception propagates to the caller afterwards.
-            if self._transition == transition and self.state == ClientState.CONNECTING:
-                self._spawn(self._create_connection())
-            raise
+        await self._ev.on_connecting(
+            ConnectingContext(code=_code_number(code), reason=_code_message(code))
+        )
+        # A handler may have disconnected (or raised, which disconnects).
         if self._transition != transition or self.state != ClientState.CONNECTING:
             return
         # The attempt runs in a task of its own: cancelling connect() (e.g. with
@@ -1082,7 +1146,7 @@ class Client:
         except Exception as e:
             if not self._connection_current(connection):
                 return
-            handler = self.events.on_error
+            handler = self._ev.on_error
             await handler(
                 ErrorContext(code=_code_number(_ErrorCode.CLIENT_REFRESH_TOKEN), error=e),
             )
@@ -1102,7 +1166,7 @@ class Client:
                 # connected.
                 await self._disconnect(code, message, False)
                 return
-            handler = self.events.on_error
+            handler = self._ev.on_error
             await handler(
                 ErrorContext(
                     code=_code_number(_ErrorCode.CLIENT_REFRESH_TOKEN),
@@ -1131,7 +1195,7 @@ class Client:
             code = _DisconnectedCode.UNAUTHORIZED
             await self._disconnect(_code_number(code), _code_message(code), False)
             return
-        handler = self.events.on_error
+        handler = self._ev.on_error
         await handler(
             ErrorContext(code=_code_number(_ErrorCode.CLIENT_REFRESH_TOKEN), error=e),
         )
@@ -1213,7 +1277,7 @@ class Client:
         except Exception as e:
             if not current():
                 return
-            handler = sub.events.on_error
+            handler = sub._ev.on_error
             await handler(
                 SubscriptionErrorContext(
                     code=_code_number(_ErrorCode.SUBSCRIPTION_REFRESH_TOKEN),
@@ -1235,7 +1299,7 @@ class Client:
                 # to the unsubscribed state, like on a terminal subscribe error.
                 await sub._move_unsubscribed(code, message, send_unsubscribe_command=True)
                 return
-            handler = sub.events.on_error
+            handler = sub._ev.on_error
             await handler(
                 SubscriptionErrorContext(
                     code=_code_number(_ErrorCode.SUBSCRIPTION_REFRESH_TOKEN),
@@ -1270,7 +1334,7 @@ class Client:
                 send_unsubscribe_command=True,
             )
             return
-        handler = sub.events.on_error
+        handler = sub._ev.on_error
         await handler(
             SubscriptionErrorContext(
                 code=_code_number(_ErrorCode.SUBSCRIPTION_REFRESH_TOKEN),
@@ -1407,7 +1471,7 @@ class Client:
             except OperationTimeoutError as e:
                 if not current():
                     return None
-                handler = sub.events.on_error
+                handler = sub._ev.on_error
                 await handler(
                     SubscriptionErrorContext(code=_code_number(_ErrorCode.TIMEOUT), error=e),
                 )
@@ -1421,7 +1485,7 @@ class Client:
             except Exception as e:
                 if not current():
                     return None
-                handler = sub.events.on_error
+                handler = sub._ev.on_error
                 await handler(
                     SubscriptionErrorContext(
                         code=_code_number(_ErrorCode.SUBSCRIBE_ERROR),
@@ -1453,7 +1517,7 @@ class Client:
                     # The token expired and there is no get_token to get another
                     # one: unauthorized, like a connection (instead of
                     # subscribing again without a token, which the server denies).
-                    handler = sub.events.on_error
+                    handler = sub._ev.on_error
                     await handler(
                         SubscriptionErrorContext(
                             code=_code_number(_ErrorCode.BAD_CONFIGURATION),
@@ -1472,7 +1536,7 @@ class Client:
                     temporary = True
                     sub._token = ""
                 if temporary:
-                    handler = sub.events.on_error
+                    handler = sub._ev.on_error
                     await handler(
                         SubscriptionErrorContext(
                             code=_code_number(_ErrorCode.SUBSCRIBE_ERROR),
@@ -1495,7 +1559,7 @@ class Client:
             code = _UnsubscribedCode.UNAUTHORIZED
             await sub._move_unsubscribed(_code_number(code), _code_message(code))
             return
-        handler = sub.events.on_error
+        handler = sub._ev.on_error
         await handler(
             SubscriptionErrorContext(
                 code=_code_number(_ErrorCode.SUBSCRIPTION_SUBSCRIBE_TOKEN),
@@ -1519,7 +1583,7 @@ class Client:
         except Exception as e:
             if not current():
                 return False
-            handler = sub.events.on_error
+            handler = sub._ev.on_error
             await handler(
                 SubscriptionErrorContext(
                     code=_code_number(_ErrorCode.SUBSCRIPTION_GET_STATE),
@@ -1993,10 +2057,10 @@ class Client:
         self, code: int, reason: str, reconnect: bool, previous_state: ClientState
     ) -> None:
         if not reconnect:
-            handler = self.events.on_disconnected
+            handler = self._ev.on_disconnected
             await handler(DisconnectedContext(code=code, reason=reason))
         elif previous_state == ClientState.CONNECTED:
-            handler = self.events.on_connecting
+            handler = self._ev.on_connecting
             await handler(ConnectingContext(code=code, reason=reason))
 
     def _stop_transport_tasks(self) -> None:
@@ -2081,7 +2145,7 @@ class Client:
             logger.error("protocol error during send: %s", e)
             if self._conn is not conn:
                 return
-            handler = self.events.on_error
+            handler = self._ev.on_error
             await handler(ErrorContext(code=_code_number(_ErrorCode.TRANSPORT_CLOSED), error=e))
             code = _ConnectingCode.TRANSPORT_CLOSED
             await self._disconnect(_code_number(code), _code_message(code), True)
@@ -2106,7 +2170,7 @@ class Client:
             server_sub = self._server_subs.get(channel)
             if server_sub:
                 del self._server_subs[channel]
-                handler = self.events.on_unsubscribed
+                handler = self._ev.on_unsubscribed
                 await handler(ServerUnsubscribedContext(channel=channel))
 
     async def _process_subscribe(self, channel: str, subscribe: Dict[str, Any]) -> None:
@@ -2122,7 +2186,7 @@ class Client:
         stream_position = None
         if positioned or recoverable:
             stream_position = StreamPosition(offset=offset, epoch=epoch)
-        handler = self.events.on_subscribed
+        handler = self._ev.on_subscribed
         await handler(
             ServerSubscribedContext(
                 channel=channel,
@@ -2208,17 +2272,17 @@ class Client:
         client_info = self._extract_client_info(join["info"])
         sub = self._subscribed_sub_for_push(channel, push_id)
         if sub:
-            await sub.events.on_join(JoinContext(info=client_info))
+            await sub._ev.on_join(JoinContext(info=client_info))
         elif push_id == 0 and channel in self._server_subs:
-            await self.events.on_join(ServerJoinContext(channel=channel, info=client_info))
+            await self._ev.on_join(ServerJoinContext(channel=channel, info=client_info))
 
     async def _process_leave(self, channel: str, leave: Any, push_id: int = 0) -> None:
         client_info = self._extract_client_info(leave["info"])
         sub = self._subscribed_sub_for_push(channel, push_id)
         if sub:
-            await sub.events.on_leave(LeaveContext(info=client_info))
+            await sub._ev.on_leave(LeaveContext(info=client_info))
         elif push_id == 0 and channel in self._server_subs:
-            await self.events.on_leave(ServerLeaveContext(channel=channel, info=client_info))
+            await self._ev.on_leave(ServerLeaveContext(channel=channel, info=client_info))
 
     def _extract_client_info(self, info: Any) -> ClientInfo:
         return ClientInfo(
@@ -2364,6 +2428,9 @@ class Subscription:
         self.channel = channel
         self.state = SubscriptionState.UNSUBSCRIBED
         self.events = events or SubscriptionEventHandler()
+        self._ev = _GuardedEvents(
+            lambda: self.events, lambda: self._client, self._publication_failed
+        )
         self._subscribed_future: asyncio.Future[bool] = asyncio.Future()
         self._subscribed = False
         self._client: Optional[Client] = client
@@ -2491,15 +2558,13 @@ class Subscription:
             self._subscribed_future = asyncio.Future()
 
         code = _SubscribingCode.SUBSCRIBE_CALLED
-        try:
-            await self.events.on_subscribing(
-                SubscribingContext(code=_code_number(code), reason=_code_message(code))
-            )
-        finally:
-            # The subscribe starts also when the handler raises (the exception
-            # propagates to the caller afterwards); not when it unsubscribed.
-            if self.state == SubscriptionState.SUBSCRIBING and self._client is not None:
-                await self._client._resubscribe(self)
+        await self._ev.on_subscribing(
+            SubscribingContext(code=_code_number(code), reason=_code_message(code))
+        )
+        # Not when a handler unsubscribed. A handler that raised stopped the client:
+        # the subscribe waits for the next connect.
+        if self.state == SubscriptionState.SUBSCRIBING and self._client is not None:
+            await self._client._resubscribe(self)
 
     async def unsubscribe(self) -> None:
         code = _UnsubscribedCode.UNSUBSCRIBE_CALLED
@@ -2515,6 +2580,11 @@ class Subscription:
 
     def _session_current(self, session: int) -> bool:
         return self._attempt == session and self.state == SubscriptionState.SUBSCRIBED
+
+    def _publication_failed(self, _ctx: Any) -> None:
+        # The publication being handled isn't delivered: the end of the session
+        # must not commit it.
+        self._pending = None
 
     def _commit_pending(self) -> None:
         # Called when the subscribed session ends.
@@ -2577,7 +2647,7 @@ class Subscription:
             # noinspection PyProtectedMember
             await client._unsubscribe(self)
 
-        await self.events.on_unsubscribed(UnsubscribedContext(code=code, reason=reason))
+        await self._ev.on_unsubscribed(UnsubscribedContext(code=code, reason=reason))
 
     async def _consume_subscribed_future(self) -> None:
         with contextlib.suppress(CentrifugeError):
@@ -2615,7 +2685,7 @@ class Subscription:
 
         attempt = self._attempt
         try:
-            await self.events.on_subscribing(SubscribingContext(code=code, reason=reason))
+            await self._ev.on_subscribing(SubscribingContext(code=code, reason=reason))
         finally:
             # The resubscribe starts also when the handler raises.
             if (
@@ -2638,7 +2708,7 @@ class Subscription:
         self.state = SubscriptionState.SUBSCRIBED
         session = self._next_attempt()
         self._subscribed_future.set_result(True)
-        on_subscribed_handler = self.events.on_subscribed
+        on_subscribed_handler = self._ev.on_subscribed
         recoverable = subscribe.get("recoverable", False)
         positioned = subscribe.get("positioned", False)
         stream_position = None
@@ -2742,11 +2812,17 @@ class Subscription:
 
         if publication.offset > 0:
             self._pending = (session, publication.offset)
+        client = self._client
+        failures = client._handler_failures if client is not None else 0
         try:
-            await self.events.on_publication(PublicationContext(pub=publication))
+            await self._ev.on_publication(PublicationContext(pub=publication))
         finally:
             if self._pending is not None and self._pending[0] == session:
                 self._pending = None
+        if client is not None and client._handler_failures != failures:
+            # The handler raised: the publication isn't delivered, the position
+            # stays before it and the client stopped.
+            return
         # The position moves after the app has the publication - and only in the
         # session it belongs to: handlers aren't cancelled, and one that finishes
         # after its session ended must not move the position (possibly back).

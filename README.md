@@ -105,11 +105,12 @@ The fact WebSocket read is blocked for the time we execute callbacks means that 
 
 ## Callbacks should not raise
 
-Callbacks are awaited as part of the SDK's own flow, so handle errors inside the callback. An exception escaping a callback is logged through the SDK's `centrifuge` logger, and:
+Callbacks are awaited as part of the SDK's own flow, so handle errors inside the callback. The SDK can't know what a callback that raised left undone, so it fails loudly instead of going on as if nothing happened, as centrifuge-js does:
 
-* when it escapes while the client handles a message from the server (a publication, a reply, `on_connected`, `on_subscribed`, ...), the client can't know what was applied: it disconnects with code `2` ("bad protocol"), as centrifuge-js does. Call `connect()` to start again;
-* when it escapes while a connection or subscription attempt is in progress (for example from `on_error` reporting a failed attempt), the attempt is retried with backoff;
-* when it escapes from a callback about a state change (`on_connecting`, `on_disconnected`, `on_subscribing`, `on_unsubscribed`), the change completes as usual: `connect()` still connects, `subscribe()` still subscribes, `unsubscribe()` still tells the server, a lost connection still reconnects. Called from `connect()`, `subscribe()` or `unsubscribe()`, the exception is then raised by that call, as in centrifuge-js.
+* the exception is passed to the event loop's exception handler (`loop.call_exception_handler`; the default one logs it), and not raised to the caller of `connect()`, `subscribe()` or `unsubscribe()`;
+* the client disconnects with code `2` ("bad protocol") and the reason `exception in event handler: ...`, and doesn't reconnect. Call `connect()` to start again;
+* the SDK's own work completes as if the callback had returned, so the client is left in a consistent state;
+* a publication whose callback raised doesn't count as delivered: after `connect()`, a recoverable subscription receives it again.
 
 Keep an eye on error logs.
 
