@@ -785,6 +785,8 @@ class Client:
         for channel, sub in list(self._subs.items()):
             if not sub or sub.state != SubscriptionState.SUBSCRIBING:
                 continue
+            # This subscribe replaces a retry still waiting from before.
+            sub._cancel_resubscribe_timer()
             self._spawn(self._subscribe(channel))
 
         await self._process_server_subs(connect.get("subs", {}), attempt)
@@ -1322,6 +1324,16 @@ class Client:
         if self.state != ClientState.CONNECTED:
             logger.debug("skip subscribe to %s until connected", channel)
             return None
+        # Started for a subscription that subscribed (or unsubscribed) meanwhile,
+        # e.g. by a resubscribe timer: nothing to do.
+        if sub.state != SubscriptionState.SUBSCRIBING:
+            return None
+        # At most one subscribe flow per subscription and connection (a resubscribe
+        # timer, the reconnect and subscribe() may each start one), as in
+        # centrifuge-js: a second one would make the first one's reply stale, and
+        # the server would answer the second subscribe "already subscribed".
+        if sub._inflight == (self._transport_id, sub._attempt):
+            return None
 
         logger.debug("subscribe to channel %s", channel)
 
@@ -1338,6 +1350,17 @@ class Client:
                 and self._connection_current(connection)
             )
 
+        marker = (connection, attempt)
+        sub._inflight = marker
+        try:
+            return await self._subscribe_steps(sub, channel, attempt, current)
+        finally:
+            if sub._inflight == marker:
+                sub._inflight = None
+
+    async def _subscribe_steps(
+        self, sub: "Subscription", channel: str, attempt: int, current: Callable[[], bool]
+    ):
         # get_state: ask the app for its current state position. Only called when
         # we don't have a saved position (first subscribe or after a position reset
         # due to unrecoverable position error 112). On normal reconnects with a
@@ -2373,6 +2396,8 @@ class Subscription:
         # the handler (e.g. unsubscribe() + subscribe() from it), so the next
         # subscribe recovers after it.
         self._pending: Optional[Tuple[int, int]] = None
+        # The subscribe flow in progress, as (connection, attempt).
+        self._inflight: Optional[Tuple[int, int]] = None
 
         if delta and delta not in {DeltaType.FOSSIL}:
             raise CentrifugeError("unsupported delta format")
@@ -2492,6 +2517,11 @@ class Subscription:
             logger.debug("canceling refresh timer for %s", self.channel)
             self._refresh_timer.cancel()
             self._refresh_timer = None
+
+    def _cancel_resubscribe_timer(self) -> None:
+        if self._resubscribe_timer:
+            self._resubscribe_timer.cancel()
+            self._resubscribe_timer = None
 
     def _clear_subscribing_state(self) -> None:
         self._resubscribe_attempts = 0

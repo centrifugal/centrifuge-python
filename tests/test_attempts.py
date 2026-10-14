@@ -157,3 +157,47 @@ class TestSubscriptionAttempts(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await wait_until(lambda: sub.state == SubscriptionState.SUBSCRIBED))
         self.assertEqual(self.errors, [])
         self.assertEqual(self.client.state, ClientState.CONNECTED)
+
+    async def test_one_subscribe_flow_per_connection(self):
+        # A token error arms a resubscribe timer; the connection is lost and the
+        # reconnect subscribes; the server answers slowly, so the timer fires
+        # while that subscribe is in flight.
+        calls = []
+
+        async def get_token(_channel):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("token service down")
+            return "token"
+
+        loop = asyncio.get_running_loop()
+        delayed = []
+
+        def drop_subscribe(cmd):
+            if not cmd.HasField("subscribe"):
+                return False
+            reply = protocol.Reply(id=cmd.id)
+            reply.subscribe.SetInParent()
+            delayed.append(
+                loop.call_later(
+                    0.4, lambda: delayed.append(loop.create_task(self.server.send_reply(reply)))
+                )
+            )
+            return True
+
+        sub = self._new_sub(
+            get_token=get_token, min_resubscribe_delay=0.2, max_resubscribe_delay=0.25
+        )
+        await self.client.connect()
+        await self.client.ready()
+        self.server.drop_command = drop_subscribe
+        await sub.subscribe()
+        self.assertTrue(await wait_until(lambda: len(calls) == 1))
+        await self.server.close_connection()
+
+        self.assertTrue(await wait_until(lambda: sub.state == SubscriptionState.SUBSCRIBED))
+        await asyncio.sleep(0.6)
+        # One subscribe on the new connection: a second one would make the first
+        # reply stale and get "already subscribed" from the server.
+        self.assertEqual(len(commands(self.server, "subscribe")), 1)
+        self.assertEqual(sub.state, SubscriptionState.SUBSCRIBED)
