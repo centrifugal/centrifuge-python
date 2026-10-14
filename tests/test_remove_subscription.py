@@ -1,6 +1,7 @@
 import asyncio
 import unittest
 
+import centrifuge.protocol.client_pb2 as protocol
 from centrifuge import CentrifugeError, Client
 from centrifuge.client import SubscriptionState
 from tests.fake_server import FakeCentrifugoServer
@@ -64,3 +65,38 @@ class TestRemoveSubscription(unittest.IsolatedAsyncioTestCase):
                 lambda: any(cmd.HasField("unsubscribe") for cmd in self.server.received)
             )
         )
+
+    async def test_removed_subscription_calls_raise_centrifuge_error(self):
+        sub = self.client.new_subscription("ch")
+        self.client.remove_subscription(sub)
+        for call in (sub.ready(), sub.history(), sub.presence(), sub.publish(b"x")):
+            with self.assertRaises(CentrifugeError):  # noqa: PT027
+                await call
+
+    async def test_history_when_removed_while_waiting(self):
+        def history_reply(cmd):
+            if not cmd.HasField("history"):
+                return None
+            reply = protocol.Reply(id=cmd.id)
+            reply.history.SetInParent()
+            return reply
+
+        self.server.on_command = history_reply
+        sub = self.client.new_subscription("ch")
+        await sub.subscribe()
+        # history() waits for the subscription; the app removes it right after
+        # the subscribe completed, before history() resumes.
+        history = asyncio.ensure_future(sub.history())
+        tasks = []
+
+        async def on_subscribed(_ctx):
+            async def remove():
+                await sub.unsubscribe()
+                self.client.remove_subscription(sub)
+
+            tasks.append(asyncio.ensure_future(remove()))
+
+        sub.events.on_subscribed = on_subscribed
+        # It used to raise AttributeError; the call goes on, as in centrifuge-js.
+        result = await history
+        self.assertIsNotNone(result)

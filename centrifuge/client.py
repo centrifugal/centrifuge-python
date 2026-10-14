@@ -2414,6 +2414,10 @@ class Subscription:
         return obj
 
     def _check_state(self):
+        if self._client is None:
+            raise CentrifugeError(
+                f"subscription to {self.channel} was removed from the client, create a new one"
+            )
         if self.state == SubscriptionState.UNSUBSCRIBED:
             raise SubscriptionUnsubscribedError("subscription unsubscribed")
 
@@ -2433,8 +2437,11 @@ class Subscription:
         reverse: bool = False,
         timeout: Optional[float] = None,
     ) -> HistoryResult:
+        # The client is taken before waiting: the subscription may be removed
+        # meanwhile, and the call goes on (as in centrifuge-js).
+        client = self._client
         await self.ready(timeout=timeout)
-        return await self._client.history(
+        return await client.history(
             self.channel,
             limit=limit,
             since=since,
@@ -2443,19 +2450,22 @@ class Subscription:
         )
 
     async def presence(self, timeout: Optional[float] = None) -> PresenceResult:
+        client = self._client
         await self.ready(timeout=timeout)
         # noinspection PyProtectedMember
-        return await self._client.presence(self.channel, timeout=timeout)
+        return await client.presence(self.channel, timeout=timeout)
 
     async def presence_stats(self, timeout: Optional[float] = None) -> PresenceStatsResult:
+        client = self._client
         await self.ready(timeout=timeout)
         # noinspection PyProtectedMember
-        return await self._client.presence_stats(self.channel, timeout=timeout)
+        return await client.presence_stats(self.channel, timeout=timeout)
 
     async def publish(self, data: Any, timeout: Optional[float] = None) -> PublishResult:
+        client = self._client
         await self.ready(timeout=timeout)
         # noinspection PyProtectedMember
-        return await self._client.publish(self.channel, data, timeout=timeout)
+        return await client.publish(self.channel, data, timeout=timeout)
 
     def set_tags_filter(self, tags_filter: Optional[FilterNode]) -> None:
         """Sets the server-side publication tags filter. Applied on the next
