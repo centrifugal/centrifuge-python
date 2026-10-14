@@ -1008,9 +1008,18 @@ class Client:
         if self._connected_future.done():
             self._connected_future = asyncio.Future()
 
-        handler = self.events.on_connecting
         code = _ConnectingCode.CONNECT_CALLED
-        await handler(ConnectingContext(code=_code_number(code), reason=_code_message(code)))
+        try:
+            await self.events.on_connecting(
+                ConnectingContext(code=_code_number(code), reason=_code_message(code))
+            )
+        except Exception:
+            # As in centrifuge-js: the attempt starts all the same - the client
+            # must not stay connecting with nothing in progress - and the
+            # exception propagates to the caller afterwards.
+            if self._transition == transition and self.state == ClientState.CONNECTING:
+                self._spawn(self._create_connection())
+            raise
         if self._transition != transition or self.state != ClientState.CONNECTING:
             return
         # The attempt runs in a task of its own: cancelling connect() (e.g. with
@@ -2446,11 +2455,16 @@ class Subscription:
         if self._subscribed_future.done():
             self._subscribed_future = asyncio.Future()
 
-        handler = self.events.on_subscribing
         code = _SubscribingCode.SUBSCRIBE_CALLED
-        await handler(SubscribingContext(code=_code_number(code), reason=_code_message(code)))
-
-        await self._client._resubscribe(self)
+        try:
+            await self.events.on_subscribing(
+                SubscribingContext(code=_code_number(code), reason=_code_message(code))
+            )
+        finally:
+            # The subscribe starts also when the handler raises (the exception
+            # propagates to the caller afterwards); not when it unsubscribed.
+            if self.state == SubscriptionState.SUBSCRIBING and self._client is not None:
+                await self._client._resubscribe(self)
 
     async def unsubscribe(self) -> None:
         code = _UnsubscribedCode.UNSUBSCRIBE_CALLED
@@ -2516,17 +2530,14 @@ class Subscription:
         )
         await self._consume_subscribed_future()
 
-        handler = self.events.on_unsubscribed
-        await handler(
-            UnsubscribedContext(
-                code=code,
-                reason=reason,
-            ),
-        )
-
+        # The command goes out before the event, as in centrifuge-js: a handler
+        # that raises (the exception propagates to the caller) or subscribes
+        # again must not keep it from the server, or reorder it.
         if send_unsubscribe_command and client is not None:
             # noinspection PyProtectedMember
             await client._unsubscribe(self)
+
+        await self.events.on_unsubscribed(UnsubscribedContext(code=code, reason=reason))
 
     async def _consume_subscribed_future(self) -> None:
         with contextlib.suppress(CentrifugeError):
@@ -2562,16 +2573,17 @@ class Subscription:
             if self._subscribed_future.done():
                 self._subscribed_future = asyncio.Future()
 
-        handler = self.events.on_subscribing
-        await handler(
-            SubscribingContext(
-                code=code,
-                reason=reason,
-            ),
-        )
-
-        if not skip_schedule_resubscribe:
-            self._client._spawn(self._client._resubscribe(self))
+        attempt = self._attempt
+        try:
+            await self.events.on_subscribing(SubscribingContext(code=code, reason=reason))
+        finally:
+            # The resubscribe starts also when the handler raises.
+            if (
+                not skip_schedule_resubscribe
+                and self._attempt == attempt
+                and self._client is not None
+            ):
+                self._client._spawn(self._client._resubscribe(self))
 
     async def _move_subscribed(self, subscribe: Dict[str, Any]) -> None:
         # Only transition to SUBSCRIBED from SUBSCRIBING state

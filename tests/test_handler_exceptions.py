@@ -85,6 +85,57 @@ class TestHandlerExceptions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), 2)
         await client.disconnect()
 
+    async def test_raising_connecting_handler_in_connect(self):
+        client = self._client()
+
+        async def on_connecting(_ctx):
+            raise AppError("handler bug")
+
+        client.events.on_connecting = on_connecting
+        # The exception reaches the caller, but the client connects all the same
+        # (it used to stay connecting for good).
+        with self.assertRaises(AppError):  # noqa: PT027
+            await client.connect()
+        self.assertTrue(await wait_until(lambda: client.state == ClientState.CONNECTED))
+        await client.disconnect()
+
+    async def test_raising_subscribing_handler_in_subscribe(self):
+        client = self._client()
+        await client.connect()
+        await client.ready()
+        sub = client.new_subscription("ch")
+
+        async def on_subscribing(_ctx):
+            raise AppError("handler bug")
+
+        sub.events.on_subscribing = on_subscribing
+        # Raises, and subscribes all the same (it used to stay subscribing).
+        with self.assertRaises(AppError):  # noqa: PT027
+            await sub.subscribe()
+        self.assertTrue(await wait_until(lambda: sub.state == SubscriptionState.SUBSCRIBED))
+        await client.disconnect()
+
+    async def test_raising_unsubscribed_handler_in_unsubscribe(self):
+        client = self._client()
+        sub = client.new_subscription("ch")
+
+        async def on_unsubscribed(_ctx):
+            raise AppError("handler bug")
+
+        sub.events.on_unsubscribed = on_unsubscribed
+        await client.connect()
+        await sub.subscribe()
+        await sub.ready()
+        with self.assertRaises(AppError):  # noqa: PT027
+            await sub.unsubscribe()
+        # The server is told all the same (it would keep the subscription otherwise).
+        self.assertTrue(
+            await wait_until(
+                lambda: any(cmd.HasField("unsubscribe") for cmd in self.server.received)
+            )
+        )
+        await client.disconnect()
+
 
 class SubscriptionHandlerOk:
     @staticmethod
