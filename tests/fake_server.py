@@ -27,6 +27,8 @@ How to extend (most→least common):
       await server.publish(b"...", channel="news")  # by channel name
   - Fully control any command reply:
       server.on_command = lambda cmd: build_reply(...) or None  # None falls through
+  - Never reply, leaving the request pending:
+      server.drop_command = lambda cmd: cmd.HasField("subscribe")
   - Send anything the protocol allows:
       await server.send_push(some_protocol_push)
   - Drive a reconnect:                await server.close_connection()
@@ -118,6 +120,9 @@ class FakeCentrifugoServer:
         )
         # Full override for any command: (command) -> Reply or None to fall through.
         self.on_command = None
+        # Leave a command without a reply: (command) -> True to drop it. The
+        # command is still recorded in received.
+        self.drop_command = None
         # Customize the subscribe result per channel: (channel, req) -> SubscribeResult.
         self.on_subscribe = None
 
@@ -195,6 +200,9 @@ class FakeCentrifugoServer:
     async def _dispatch(self, websocket, cmd):
         self.received.append(cmd)
 
+        if self.drop_command is not None and self.drop_command(cmd):
+            return
+
         if self.on_command is not None:
             reply = self.on_command(cmd)
             if reply is not None:
@@ -234,6 +242,23 @@ class FakeCentrifugoServer:
     async def send_reply(self, reply):
         """Send a raw reply to the active connection."""
         await self._send(self._current_ws, reply)
+
+    async def send_replies(self, replies):
+        """Send several raw replies to the active connection in one WebSocket
+        message (a frame the client processes reply by reply)."""
+        if not self._use_protobuf:
+            lines = []
+            for reply in replies:
+                obj = MessageToDict(reply, preserving_proto_field_name=True)
+                _map_bytes_fields(protocol.Reply.DESCRIPTOR, obj, _base64_to_json)
+                lines.append(json.dumps(obj))
+            await self._current_ws.send("\n".join(lines))
+            return
+        data = b""
+        for reply in replies:
+            raw = reply.SerializeToString()
+            data += _varint_encode(len(raw)) + raw
+        await self._current_ws.send(data)
 
     async def send_push(self, push):
         """Send a raw push (wrapped in a reply) to the active connection."""

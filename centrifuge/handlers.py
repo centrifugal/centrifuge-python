@@ -31,7 +31,9 @@ class ClientEventHandler:
         """Called when connected."""
 
     async def on_disconnected(self, ctx: DisconnectedContext) -> None:
-        """Called when disconnected."""
+        """Called when disconnected: after disconnect(), or when the server ends
+        the connection with a code that doesn't allow reconnecting. A lost
+        connection the client reconnects reports on_connecting instead."""
 
     async def on_error(self, ctx: ErrorContext) -> None:
         """Called when there's an error."""

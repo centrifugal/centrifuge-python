@@ -26,7 +26,8 @@ class TestInvalidateStateUnit(unittest.IsolatedAsyncioTestCase):
 
         sub._invalidate_state()
 
-        self.assertEqual(sub._token, "")
+        # A static token (no get_token to replace it) is kept.
+        self.assertEqual(sub._token, "sub-token")
         self.assertEqual(sub._offset, 0)
         # Recovery position reset to the sentinel epoch so a recoverable
         # subscription resubscribes with was_recovering=True, recovered=False.
@@ -35,6 +36,18 @@ class TestInvalidateStateUnit(unittest.IsolatedAsyncioTestCase):
         # non-recoverable subscription it would stay False).
         self.assertTrue(sub._recover)
         self.assertIsNone(sub._prev_data)
+
+    async def test_invalidate_state_clears_token_of_getter(self):
+        async def get_token(_channel):
+            return "fresh"
+
+        client = Client("ws://localhost:0/connection/websocket")
+        sub = client.new_subscription("ch", token="sub-token", get_token=get_token)  # noqa: S106
+
+        sub._invalidate_state()
+
+        # The next subscribe gets a new token from get_token.
+        self.assertEqual(sub._token, "")
 
     async def test_invalidate_state_resets_server_sub_recovery_position(self):
         client = Client("ws://localhost:0/connection/websocket")
@@ -72,7 +85,7 @@ class TestStateInvalidationWire(unittest.IsolatedAsyncioTestCase):
         sub.events.on_subscribed = on_subscribed
         return fut
 
-    async def test_unsubscribe_2502_clears_sub_token_and_resubscribes(self):
+    async def test_unsubscribe_2502_keeps_static_sub_token_and_resubscribes(self):
         client = Client(self.server.url, use_protobuf=True, min_reconnect_delay=0.05)
         sub = client.new_subscription("ch", token="sub-token-0")  # noqa: S106
         subscribed = self._subscribed_future(sub)
@@ -86,8 +99,10 @@ class TestStateInvalidationWire(unittest.IsolatedAsyncioTestCase):
         await self.server.unsubscribe("ch", _STATE_INVALIDATED_UNSUBSCRIBE, "state invalidated")
         await asyncio.wait_for(resubscribed, timeout=5)
 
-        self.assertEqual(sub._token, "")
-        self.assertEqual(self.server.last_subscribe().token, "")
+        # The token is static (no get_token to replace it): it is kept, the
+        # server would deny a resubscribe without it.
+        self.assertEqual(sub._token, "sub-token-0")
+        self.assertEqual(self.server.last_subscribe().token, "sub-token-0")
         await client.disconnect()
 
     async def test_disconnect_3014_clears_conn_token_and_invalidates_subs(self):
@@ -143,8 +158,9 @@ class TestStateInvalidationWire(unittest.IsolatedAsyncioTestCase):
             if cmd.HasField("connect"):
                 last_connect = cmd.connect
         self.assertEqual(last_connect.token, "conn-token-1")
-        # Subscription was invalidated — resubscribe carries no token.
-        self.assertEqual(self.server.last_subscribe().token, "")
+        # The subscription was invalidated, but its token is static (no
+        # get_token to replace it): the resubscribe carries it.
+        self.assertEqual(self.server.last_subscribe().token, "sub-token-0")
         await client.disconnect()
 
     async def test_disconnect_3014_resets_server_sub_recovery_position(self):
