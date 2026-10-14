@@ -65,6 +65,9 @@ jobs:
             protobuf-version: "5.29.6"
 
     runs-on: ${{ matrix.os }}
+    # A healthy run takes about a minute. A hung test would otherwise keep the job
+    # running until GitHub's default limit of 6 hours.
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v6
