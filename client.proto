@@ -1,32 +1,108 @@
+// Client protocol of Centrifuge and Centrifugo.
+//
+// This file describes messages exchanged between a client SDK and a server
+// over a real-time transport. The same schema is used for both supported
+// encodings:
+//
+//   - Protobuf: messages are encoded as Protobuf, several messages in one
+//     frame are varint length-delimited.
+//   - JSON: messages are encoded as JSON objects using the field names below,
+//     several messages in one frame are separated by a new line. Fields of
+//     type bytes carry raw embedded JSON, not base64.
+//
+// Client sends Command messages, server sends Reply messages. On unidirectional
+// transports (where the client does not send commands over the connection)
+// server sends Push messages without a Reply wrapper.
+//
+// Compatibility: field numbers and names are part of the wire contract (names
+// matter for JSON). Never renumber, rename or change type of an existing field.
+// Removed fields must be added to reserved.
+//
+// oneof is intentionally not used anywhere in this file for JSON
+// interoperability: a message which semantically carries one of several
+// payloads has them as separate optional fields, exactly one of which is set.
+
 syntax = "proto3";
 
 package centrifugal.centrifuge.protocol;
 
 option go_package = "github.com/centrifugal/protocol";
 
+// Error is returned in Reply to a Command which could not be processed.
+//
+// Codes in range [0, 399] are reserved by Centrifuge, applications use
+// codes in range [400, 1999]. Built-in codes:
+//
+//   100 internal server error (temporary)
+//   101 unauthorized
+//   102 unknown channel
+//   103 permission denied
+//   104 method not found
+//   105 already subscribed
+//   106 limit exceeded
+//   107 bad request
+//   108 not available
+//   109 token expired
+//   110 expired
+//   111 too many requests (temporary)
+//   112 unrecoverable position
+//   113 concurrent pagination (temporary)
+//
+// Note that many protocol violations result in a Disconnect instead of an
+// Error reply.
 message Error {
+  // Error code.
   uint32 code = 1;
+  // Human readable error description. Clients must not rely on its content,
+  // use code instead.
   string message = 2;
+  // When set the error condition is temporary and the same command may succeed
+  // if retried later (preferably with a backoff).
   bool temporary = 3;
 }
 
+// EmulationRequest is the body of an HTTP request a client sends to the
+// emulation endpoint when it uses bidirectional emulation over a transport
+// which can only stream data from server to client (HTTP-streaming, SSE).
+// Server-to-client data flows over the stream, while client commands are
+// delivered with EmulationRequest and routed to the node which holds the
+// connection.
+//
+// The request body is Protobuf when sent with Content-Type
+// application/octet-stream, JSON otherwise. The server responds with HTTP
+// 204 No Content on success - replies to commands arrive over the stream.
 message EmulationRequest {
+  // Id of the node serving the connection, from ConnectResult.node.
   string node = 1;
+  // Session of the connection, from ConnectResult.session.
   string session = 2;
+  // Encoded Command(s) in the connection protocol, may contain several
+  // commands in the same format as a regular transport frame. For JSON this
+  // is a JSON string containing the encoded commands, for Protobuf - raw bytes.
   bytes data = 3;
 }
 
-// Command sent from a client to a server.
+// Command is sent from a client to a server.
 message Command {
-  // Id of command to let client match replies to commands.
+  // Id of the command, echoed back in Reply.id to let the client match replies
+  // to commands. Must be > 0 for every command expecting a reply. Only a send
+  // command, which never gets a reply, may have zero id.
+  //
+  // A command with zero id and no request set (empty Command) is a pong - the
+  // response to a server ping, see ConnectResult.pong. A pong without a
+  // preceding server ping results in a bad request disconnect.
   uint32 id = 1;
 
   reserved 2, 3;
 
-  // Client can send one of the following requests. Server will
-  // only take the first non-null request out of these and may return an error if
-  // client passed more than one request. We are not using oneof here due to JSON
+  // Client sets exactly one of the following requests. The server handles
+  // only one request per command and ignores the rest, so clients must not
+  // set several. A command with no request (other than pong) results in a
+  // bad request disconnect. We are not using oneof here due to JSON
   // interoperability concerns.
+
+  // Connect must be the first command sent over a connection. Any other
+  // command before a successful connect results in a disconnect.
   ConnectRequest connect = 4;
   SubscribeRequest subscribe = 5;
   UnsubscribeRequest unsubscribe = 6;
@@ -34,26 +110,33 @@ message Command {
   PresenceRequest presence = 8;
   PresenceStatsRequest presence_stats = 9;
   HistoryRequest history = 10;
+  // Not supported by the server at the moment, see PingRequest.
   PingRequest ping = 11;
+  // Asynchronous message to the server, no Reply is sent in response.
   SendRequest send = 12;
   RPCRequest rpc = 13;
   RefreshRequest refresh = 14;
   SubRefreshRequest sub_refresh = 15;
 }
 
-// Reply is sent from a server to a client is sent as a response to Command or
-// can be an async server-to-client Push.
+// Reply is sent from a server to a client as a response to a Command, or as
+// an asynchronous server-to-client Push.
+//
+// An empty Reply (all fields unset, i.e. {} in JSON) is a server ping. When
+// ConnectResult.pong is set the client must respond to it with an empty
+// Command.
 message Reply {
-  // Id will only be set to a value > 0 for replies to commands. For pushes
-  // coming from server to client it has zero value.
+  // Id of the Command this Reply responds to. It is zero for pushes.
   uint32 id = 1;
-  // Error can only be set in replies to commands. For pushes it is never set.
+  // Error of the command. Only set in replies to commands, never for pushes.
+  // When set, no result field is set.
   Error error = 2;
 
   reserved 3;
 
-  // ProtocolVersion2 server can send one of the following fields. We are not using
-  // oneof here due to JSON interoperability concerns.
+  // Server sets at most one of the following fields: push for asynchronous
+  // pushes, or the result matching the request of the Command. We are not
+  // using oneof here due to JSON interoperability concerns.
   Push push = 4;
   ConnectResult connect = 5;
   SubscribeResult subscribe = 6;
@@ -68,78 +151,208 @@ message Reply {
   SubRefreshResult sub_refresh = 15;
 }
 
-// Push can be sent to a client as part of Reply in case of bidirectional transport or
-// without additional wrapping in case of unidirectional transports.
+// Push is an asynchronous message from a server to a client. It is sent
+// inside Reply.push on bidirectional transports, and without additional
+// wrapping on unidirectional transports. An empty Push on a unidirectional
+// transport is a server ping, no response is expected.
 message Push {
   reserved 3;
-  int64 id = 1; // Optional numeric channel ID to avoid sending string channel in Push (bandwidth optimization).
+  // Optional numeric channel id, used instead of channel to save bandwidth.
+  // Only used in pub, join and leave pushes of subscriptions where the client
+  // requested a numeric channel id and the server provided one in
+  // SubscribeResult.id. When it is used, channel is empty.
+  int64 id = 1;
+  // Channel the push relates to. Empty for pushes not related to a channel
+  // (message, connect, disconnect, refresh) and when id is used.
   string channel = 2;
 
-  // Server can push one of the following fields to the client. We are
-  // not using oneof here due to JSON interoperability concerns.
+  // Server sets one of the following fields. We are not using oneof here due
+  // to JSON interoperability concerns.
+
+  // Publication in a subscribed channel.
   Publication pub = 4;
+  // A client subscribed to the channel, only sent when join/leave pushes are
+  // enabled for the subscription.
   Join join = 5;
+  // A client unsubscribed from the channel, only sent when join/leave pushes
+  // are enabled for the subscription.
   Leave leave = 6;
+  // Server unsubscribed the client from the channel.
   Unsubscribe unsubscribe = 7;
+  // Asynchronous message from the server to the client, not related to a channel.
   Message message = 8;
+  // Server subscribed the client to the channel (server-side subscription).
   Subscribe subscribe = 9;
+  // Connection established. Only sent on unidirectional transports, where it
+  // is the first push and replaces ConnectResult.
   Connect connect = 10;
+  // Server is closing the connection. May not be sent on transports which
+  // deliver code and reason natively (e.g. in a WebSocket close frame).
   Disconnect disconnect = 11;
+  // Connection credentials refreshed on the server side.
   Refresh refresh = 12;
+  // A new resume ticket replacing the held one, or a clear (ttl 0).
+  Resume rsm = 13;
 }
 
-// ClientInfo contains information about client connection.
+// Dictionary is a shared compression dictionary the server asks the client to
+// use for subsequent frames on this connection. It arrives in the connect
+// reply, and every frame after that reply starts with a one byte codec marker
+// saying whether it was compressed.
+message Dictionary {
+  // Identifier of dictionary content, client may cache by it.
+  //
+  // It is SHA-256 of the content, first 12 bytes, base64url without padding.
+  //
+  // The derivation is fixed rather than conventional, because a client that
+  // keeps a dictionary between connections hashes the bytes it stored against
+  // this id before reusing them. Storage shared with anything else on the
+  // client's origin can be rewritten, and DEFLATE back references resolve into
+  // the dictionary - so substituted content does not corrupt a frame, it makes
+  // a genuine server frame decode into whatever the substituter chose. Only an
+  // id the server issued detects that: a checksum the client stored alongside
+  // would simply be rewritten with the bytes.
+  //
+  // A server identifying dictionaries some other way is not rejected. It has
+  // every caching client quietly stop caching instead, which is worse.
+  //
+  // It also means one id can never name two different dictionaries, so a client
+  // reconnecting to a node that built its own gets an exact match or a miss,
+  // never the wrong bytes.
+  string id = 1;
+  // The dictionary content, always DEFLATE compressed. Inflate it with no preset
+  // dictionary before use.
+  //
+  // It is compressed because it arrives in the connect reply, which cannot be
+  // compressed at the frame level - nothing is installed yet to compress it
+  // against. Compressing the content instead is worth about 8x on JSON, and a
+  // dictionary is sampled message text so it always compresses.
+  //
+  // data is set on Protobuf connections, where bytes travel directly. data_b64
+  // is set on JSON connections, where a bytes field carries raw JSON and cannot
+  // hold binary - it is standard base64 with padding of the same compressed
+  // content. Exactly one of them is set, and neither when the server is naming
+  // a dictionary the client already holds.
+  bytes data = 2;
+  string data_b64 = 3;
+}
+
+// ClientInfo contains information about a client connection.
 message ClientInfo {
+  // User id. Empty for anonymous connections.
   string user = 1;
+  // Unique client (connection) id.
   string client = 2;
+  // Optional connection info attached by the application at connect time,
+  // may be updated on connection refresh.
   bytes conn_info = 3;
+  // Optional channel info attached by the application at subscribe time.
   bytes chan_info = 4;
 }
 
-// Publication in channel.
+// Publication in a channel.
 message Publication {
   reserved 1, 2, 3;
-  bytes data = 4; // Data contains publication payload.
-  ClientInfo info = 5; // Info contains optional information about publisher. Usually it is set only if publication goes from the client side.
-  uint64 offset = 6; // Offset is a stream offset of the publication. Epoch is given in SubscribeResult.
-  map<string, string> tags = 7; // Optional tags associated with publication.
-  bool delta = 8;  // When set indicates that data in Publication is a delta from previous data.
-  int64 time = 9;  // Optional time of publication as Unix timestamp milliseconds.
-  string channel = 10; // Optional channel name if Publication relates to wildcard subscription.
+  // Publication payload. When Publication.delta is set it is a delta patch
+  // against the previous payload. On JSON connections with delta compression
+  // negotiated it is a JSON string with the payload (or patch) inside.
+  bytes data = 4;
+  // Optional information about the publisher. Usually it is set only if
+  // the publication was sent from the client side.
+  ClientInfo info = 5;
+  // Position of the publication in the channel stream. Epoch is given in
+  // SubscribeResult (and in Publication.epoch when it changes). Zero when the
+  // channel has no stream.
+  uint64 offset = 6;
+  // Optional tags associated with the publication, also used by tags filter,
+  // see SubscribeRequest.tf.
+  map<string, string> tags = 7;
+  // When set, data is a delta patch against the data of the previous
+  // publication in this subscription, see SubscribeRequest.delta.
+  bool delta = 8;
+  // Time of the publication as Unix timestamp in milliseconds. Used between
+  // server nodes, not sent to clients by the current server.
+  int64 time = 9;
+  // Channel of the publication. Only set when it differs from the channel of
+  // the subscription, i.e. for wildcard subscriptions.
+  string channel = 10;
+  // Key of the entry in a map subscription, or of the item in a shared poll
+  // subscription. For map presence subscriptions it is a client id or a user
+  // id.
+  string key = 11;
+  // When set, the publication removes the entry with the given key from map
+  // (or shared poll) state.
+  bool removed = 12;
+  // Score of the entry used to order ordered map state.
+  sint64 score = 13;
+  // Optional stream epoch, set to let the client learn the new epoch (for
+  // example on the first publication of a new stream).
+  string epoch = 14;
+  // Previous data used for delta computation during broker fan-out between
+  // server nodes. Never sent to clients.
+  bytes prev_data = 15;
+  // Version of the item, used by shared poll subscriptions to only deliver
+  // data newer than the client already has.
+  uint64 version = 16;
 }
 
-// Join to channel.
+// Join is sent when a client subscribes to a channel.
 message Join {
+  // Information about the client which subscribed.
   ClientInfo info = 1;
 }
 
-// Leave from channel.
+// Leave is sent when a client unsubscribes from a channel.
 message Leave {
+  // Information about the client which unsubscribed.
   ClientInfo info = 1;
 }
 
-// Unsubscribe from channel.
+// Unsubscribe from a channel, sent by the server.
 message Unsubscribe {
   reserved 1;
+  // Unsubscribe code in range [2000, 2999]. Codes >= 2500 mean the client
+  // should resubscribe, codes < 2500 mean it should not. Codes [2000, 2099]
+  // and [2500, 2599] are reserved by Centrifuge. Built-in codes:
+  //
+  //   2000 server unsubscribe
+  //   2500 insufficient state
+  //   2501 subscription expired
+  //   2502 state invalidated - client must drop its subscription token and
+  //        any state accumulated for the subscription before resubscribing
   uint32 code = 2;
+  // Human readable reason, for logging and debugging.
   string reason = 3;
 }
 
-// Subscribe to channel, used for server-side subscriptions.
+// Subscribe is sent when the server subscribes the client to a channel
+// (server-side subscription) after the connection was established. Server-side
+// subscriptions established at connect time are delivered in
+// ConnectResult.subs instead.
 message Subscribe {
+  // When set the subscription supports recovery: the client should keep the
+  // stream position and pass it in ConnectRequest.subs on reconnect.
   bool recoverable = 1;
   reserved 2, 3;
+  // Current stream epoch.
   string epoch = 4;
+  // Current stream offset.
   uint64 offset = 5;
+  // When set the client should track stream position of the subscription.
   bool positioned = 6;
+  // Optional custom data attached to the subscription by the application.
   bytes data = 7;
 }
 
-// Message from client to server. No Reply is sent in response to Message.
+// Message is an asynchronous message sent from the server to the client. It is
+// not related to any channel and the client does not reply to it.
 message Message {
+  // Message payload.
   bytes data = 1;
 }
 
+// Connect is the first push on unidirectional transports, it is the
+// equivalent of ConnectResult. See ConnectResult for field descriptions.
 message Connect {
   string client = 1;
   string version = 2;
@@ -148,174 +361,498 @@ message Connect {
   bool expires = 5;
   uint32 ttl = 6;
   uint32 ping = 7;
+  // Never set on unidirectional transports: the client can not send a pong.
   bool pong = 8;
   string session = 9;
   string node = 10;
-  int64 time = 11; // Server time as Unix timestamp in milliseconds (not sent by default).
+  // Server time as Unix timestamp in milliseconds (not sent by default).
+  int64 time = 11;
 }
 
+// Disconnect is sent when the server closes the connection.
+//
+// Code ranges:
+//
+//   [0, 2999]    reserved for client-side and transport specific needs.
+//   [3000, 3499] reserved by Centrifuge, client should reconnect.
+//   [3500, 3999] reserved by Centrifuge, terminal - client must not reconnect.
+//   [4000, 4499] application codes, client should reconnect.
+//   [4500, 4999] application codes, terminal - client must not reconnect.
+//   >= 5000      reserved by Centrifuge, client should reconnect.
 message Disconnect {
+  // Disconnect code, see the code ranges above.
   uint32 code = 1;
+  // Human readable reason. Less than 127 bytes due to WebSocket close frame
+  // limitations.
   string reason = 2;
+  // Deprecated: not set by the current server. Clients decide whether to
+  // reconnect based on code.
   bool reconnect = 3;
 }
 
+// Refresh is sent when connection credentials were refreshed on the server
+// side.
 message Refresh {
+  // When set the connection expires, ttl contains time until expiration.
   bool expires = 1;
+  // Seconds until the connection expires.
   uint32 ttl = 2;
 }
 
+// ConnectRequest authenticates a connection. It must be the first command sent
+// by a client.
 message ConnectRequest {
+  // Connection token (JWT in Centrifugo), optional if the server can
+  // authenticate the connection in another way.
   string token = 1;
+  // Optional custom data passed to the application connect handler.
   bytes data = 2;
+  // Server-side subscriptions the client wants to restore, keyed by channel.
+  // Only recover, epoch, offset and delta of each SubscribeRequest are used -
+  // they let the server recover publications the client missed since its
+  // last known position. The server decides which subscriptions are granted.
   map<string, SubscribeRequest> subs = 3;
+  // Name of the client SDK or application.
   string name = 4;
+  // Version of the client SDK or application.
   string version = 5;
+  // Custom headers to pass to the server. Used when a transport does not
+  // allow setting HTTP headers (e.g. WebSocket in a browser), the application
+  // decides how to use them.
   map<string, string> headers = 6;
-  int64 flag = 7; // Enable connection level features.
+  // Connection level features this client supports, as a bitmask. The server
+  // replies with the subset it enabled in ConnectResult.flag.
+  //
+  //   1 << 0  dictionary compression, see Dictionary.
+  //   1 << 1  resume tickets, see Resume. The server issues tickets only to
+  //           clients that set it.
+  int64 flag = 7;
+  // Application context this connection belongs to - which view, screen or
+  // client kind it is. Connections sharing a profile see traffic of a similar
+  // shape.
+  //
+  // Untrusted: the server may override it, and features built on it must treat
+  // it as a hint rather than an assertion.
+  string profile = 9;
+  // Id of the compression dictionary this client already holds, so the server
+  // can name it instead of sending it again.
+  //
+  // The server answers with a Dictionary carrying only an id when it recognises
+  // this one, and with the full content otherwise - so an unknown id is a cache
+  // miss rather than an error.
+  //
+  // An id is a hash of the dictionary content, so this id and the server's copy
+  // are byte identical by construction: a dictionary that changes gets a new id
+  // automatically.
+  //
+  // Deliberately one, not a list. A client caches the last dictionary it was
+  // given, which is the one it needs when reconnecting to the same profile. The
+  // cost is one extra transfer per hop during a rolling deploy where nodes
+  // disagree, which is bounded and small.
+  string dict = 8;
+  // Resume ticket from a previous connection, see Resume. When the server
+  // accepts it, the connection is restored without re-authorization and token
+  // and data are not used; otherwise the connect proceeds as without it, so
+  // token and data must still be sent.
+  //
+  // The ticket is opaque: the client sends back exactly what it was given, in
+  // the field it arrived in. rsm is set on Protobuf connections, rsm_b64 on
+  // JSON connections (where a bytes field carries raw JSON).
+  bytes rsm = 10;
+  string rsm_b64 = 11;
 }
 
+// ConnectResult is the result of a successful connect.
 message ConnectResult {
+  // Unique client (connection) id assigned by the server.
   string client = 1;
+  // Server version.
   string version = 2;
+  // When set the connection expires and the client must send RefreshRequest
+  // with a new token before ttl elapses.
   bool expires = 3;
+  // Seconds until the connection expires.
   uint32 ttl = 4;
+  // Optional custom data returned by the application connect handler.
   bytes data = 5;
+  // Server-side subscriptions of the connection, keyed by channel.
   map<string, SubscribeResult> subs = 6;
+  // Server ping interval in seconds, zero when the server does not send pings.
+  // The client may consider the connection lost if no data (including pings)
+  // arrived from the server for noticeably longer than this interval.
   uint32 ping = 7;
+  // When set the client must respond to every server ping (empty Reply) with
+  // a pong (empty Command), otherwise the server closes the connection.
   bool pong = 8;
+  // Session of the connection, set for unidirectional transports and for
+  // bidirectional emulation, see EmulationRequest.session.
   string session = 9;
+  // Id of the node serving the connection, set for bidirectional emulation,
+  // see EmulationRequest.node.
   string node = 10;
-  int64 time = 11; // Server time as Unix timestamp in milliseconds (not sent by default).
+  // Server time as Unix timestamp in milliseconds (not sent by default).
+  int64 time = 11;
+  // Connection level features the server actually enabled, using the same bits
+  // as ConnectRequest.flag. A client can not assume a feature it advertised was
+  // accepted - the server may have it disabled, or may decline per connection -
+  // so this is how it finds out.
+  int64 flag = 12;
+  // Compression dictionary for this connection, when the server enabled
+  // dictionary compression.
+  //
+  // It travels in the connect reply rather than a push so there is no ordering
+  // rule to get wrong: this frame is raw, and every frame after it is
+  // compressed. It carries only an id when the client advertised that same id in
+  // ConnectRequest.dict, since the client already holds the bytes.
+  Dictionary dict = 13;
+  // Resume ticket for the next connect, when the server issued one. A connect
+  // reply without it means the client must drop any ticket it holds.
+  Resume rsm = 14;
+  // Set when the connection was restored from a resume ticket, informational.
+  bool resumed = 15;
 }
 
+// RefreshRequest refreshes an expiring connection with a new token.
 message RefreshRequest {
+  // New connection token, required.
   string token = 1;
 }
 
+// RefreshResult is the result of a connection refresh.
 message RefreshResult {
+  // Not set by the current server.
   string client = 1;
+  // Not set by the current server.
   string version = 2;
+  // When set the connection still expires, ttl contains time until expiration.
   bool expires = 3;
+  // Seconds until the connection expires.
   uint32 ttl = 4;
 }
 
+// SubscribeRequest subscribes the client to a channel.
+//
+// Some fields only apply to specific subscription types, see type.
 message SubscribeRequest {
+  // Channel to subscribe to, required.
   string channel = 1;
+  // Optional subscription token (JWT in Centrifugo).
   string token = 2;
+  // When set the client asks the server to recover publications missed since
+  // the stream position given in epoch and offset.
   bool recover = 3;
   reserved 4, 5;
+  // Stream epoch of the last known position.
   string epoch = 6;
+  // Stream offset of the last known position.
   uint64 offset = 7;
+  // Optional custom data passed to the application subscribe handler.
   bytes data = 8;
+  // Hint that the client wants a positioned subscription. The final decision
+  // is made by the server, see SubscribeResult.positioned.
   bool positioned = 9;
+  // Hint that the client wants a recoverable subscription. The final decision
+  // is made by the server, see SubscribeResult.recoverable.
   bool recoverable = 10;
+  // Hint that the client wants join/leave pushes. The final decision is made
+  // by the server.
   bool join_leave = 11;
+  // Delta compression type the client wants for publications. The only
+  // supported value is "fossil". Whether it was negotiated is reported in
+  // SubscribeResult.delta.
   string delta = 12;
-  FilterNode tf = 13; // Optional server side filter based on publication tags .
-  int64 flag = 14; // Enable subscription level features.
+  // Optional server-side filter based on publication tags. Only publications
+  // matching the filter are delivered. Must be allowed by the server, and
+  // disables delta compression. Meant to reduce bandwidth, not as an access
+  // control mechanism.
+  FilterNode tf = 13;
+  // Subscription level features, as a bitmask:
+  //
+  //   1 << 0  numeric channel id requested, see SubscribeResult.id.
+  //   1 << 1  reject unrecovered: fail the subscription with error 112
+  //           (unrecoverable position) instead of succeeding with
+  //           SubscribeResult.recovered unset when recovery is not possible.
+  //   1 << 2  resume: authorize against the connection's resume ticket
+  //           instead of token and proxies. Ignored when the connection was
+  //           not resumed or the channel is not in the ticket, so token and
+  //           data must still be sent.
+  int64 flag = 14;
+  // Subscription type:
+  //
+  //   0  stream - regular channel subscription (default).
+  //   1  map - subscription to map state with stream of changes.
+  //   2  map clients - map of clients present in the channel.
+  //   3  map users - map of users present in the channel.
+  //   4  shared poll.
+  int32 type = 15;
+  // Phase of a map subscription:
+  //
+  //   0  live - join real-time updates (default).
+  //   1  stream - page through stream (catch-up).
+  //   2  state - page through map state.
+  int32 phase = 16;
+  // Map subscriptions: cursor of the state page to load, from
+  // SubscribeResult.cursor. Empty for the first page.
+  string cursor = 17;
+  // Map subscriptions: page size. Zero or negative means server default. The
+  // server clamps it to its configured bounds.
+  int32 limit = 18;
+  // Map subscriptions, state phase: when set ordered map state is returned
+  // in ascending order, descending is the default. Ignored for unordered maps.
+  bool asc = 19;
 }
 
+// SubscribeResult is the result of a successful subscribe. It is also used to
+// describe server-side subscriptions in ConnectResult.subs.
 message SubscribeResult {
+  // When set the subscription expires and the client must send
+  // SubRefreshRequest with a new token before ttl elapses.
   bool expires = 1;
+  // Seconds until the subscription expires.
   uint32 ttl = 2;
+  // When set the subscription supports recovery: the client should keep the
+  // stream position and use it on resubscribe.
   bool recoverable = 3;
   reserved 4, 5;
+  // Current stream epoch.
   string epoch = 6;
+  // Publications: recovered after the requested position, initial
+  // publications provided by the application, or stream page for maps.
   repeated Publication publications = 7;
+  // When set the client successfully recovered all missed publications.
   bool recovered = 8;
+  // Stream offset. The current stream top, or - when publications were
+  // recovered - the position the client advances from by applying them.
   uint64 offset = 9;
+  // When set the client should track stream position of the subscription.
   bool positioned = 10;
+  // Optional custom data attached to the subscription by the application.
   bytes data = 11;
+  // When set the server attempted recovery for this subscription, check
+  // recovered for the outcome.
   bool was_recovering = 12;
+  // When set delta compression was negotiated, and Publication.delta tells
+  // whether a publication carries a delta patch.
   bool delta = 13;
-  int64 id = 14; // Optional numeric channel ID to avoid sending string channel in the following Pushes (bandwidth optimization).
+  // Optional numeric channel id to avoid sending string channel in the
+  // following pushes (bandwidth optimization). Set when requested with
+  // SubscribeRequest.flag and allowed by the server, see Push.id.
+  int64 id = 14;
+  // Type of the subscription: 0 for stream, 1 for all map types (including
+  // map clients and map users), 4 for shared poll.
+  int32 type = 15;
+  // The result phase of a map subscription (live = 0, stream = 1,
+  // state = 2), see SubscribeRequest.phase.
+  int32 phase = 16;
+  // Map subscriptions, state phase: cursor of the next page. Empty when this
+  // is the last state page.
+  string cursor = 17;
+  // Map subscriptions: state entries.
+  repeated Publication state = 18;
+  // Interval in milliseconds. When > 0 the SDK should debounce client
+  // publications to this channel; the first one is not debounced.
+  uint32 publish_debounce = 19;
+  // Set when the subscription was authorized from the connection's resume
+  // ticket, informational.
+  bool resumed = 20;
 }
 
+// Resume carries a resume ticket: an opaque, encrypted proof of what the
+// server decided about a connection, which lets a reconnect skip
+// re-authorization. The client keeps it in memory only, never in storage.
+message Resume {
+  // The ticket. ticket is set on Protobuf connections, ticket_b64 (standard
+  // base64 with padding) on JSON connections. Opaque: sent back unchanged in
+  // ConnectRequest.rsm or ConnectRequest.rsm_b64 respectively.
+  bytes ticket = 1;
+  string ticket_b64 = 2;
+  // Seconds the ticket stays usable from the moment it was received. Zero
+  // means clear: drop the held ticket.
+  uint32 ttl = 3;
+}
+
+// KeyedItem is a key the client tracks in a shared poll subscription.
+message KeyedItem {
+  // Item key.
+  string key = 1;
+  // Version of the item data the client currently holds, zero when it has
+  // none. The server only sends data with a greater version.
+  uint64 version = 2;
+}
+
+// TrackBatch is a set of keys to track authorized by a single signature.
+message TrackBatch {
+  // Signature issued by the application backend, an HMAC over (iat, expiry,
+  // user, channel, keys).
+  string signature = 1;
+  // Full key set the signature was computed over, with versions the client
+  // currently holds.
+  repeated KeyedItem items = 2;
+}
+
+// SubRefreshRequest refreshes an expiring subscription with a new token, or
+// manages tracked keys of a shared poll subscription.
 message SubRefreshRequest {
+  // Channel of the subscription, required.
   string channel = 1;
+  // New subscription token, required for type 0.
   string token = 2;
+  // Request type:
+  //
+  //   0  refresh subscription token (default).
+  //   1  track keys (shared poll), see track.
+  //   2  untrack keys (shared poll), see untrack.
+  int32 type = 3;
+  // Batches of keys to start tracking, for type 1.
+  repeated TrackBatch track = 4;
+  // Keys to stop tracking, for type 2. Also honoured with type 1.
+  repeated string untrack = 5;
 }
 
+// SubRefreshResult is the result of SubRefreshRequest.
 message SubRefreshResult {
+  // When set the subscription (or tracked keys) expire.
   bool expires = 1;
+  // Seconds until expiration. For type 0 - until the subscription token
+  // expires. For type 1 - minimal ttl across all tracked batches.
   uint32 ttl = 2;
+  // Type 1: latest data of tracked keys for which the server has a version
+  // newer than the client sent.
+  repeated Publication items = 3;
 }
 
+// UnsubscribeRequest unsubscribes the client from a channel.
 message UnsubscribeRequest {
+  // Channel to unsubscribe from.
   string channel = 1;
 }
 
+// UnsubscribeResult is the result of an unsubscribe.
 message UnsubscribeResult {}
 
+// PublishRequest publishes data to a channel.
 message PublishRequest {
+  // Channel to publish to, required.
   string channel = 1;
+  // Publication payload.
   bytes data = 2;
+  // Publish type: 0 - regular publication (default), 1 - map publication.
+  int32 type = 3;
+  // Map publication: key of the entry to publish or remove. Passed to the
+  // application publish handler, which decides the final key.
+  string key = 4;
+  // Map publication: when set the entry with the key is removed.
+  bool removed = 5;
 }
 
-message PublishResult {}
+// PublishResult is the result of a publish.
+message PublishResult {
+}
 
+// PresenceRequest asks for the presence information of a channel.
 message PresenceRequest {
+  // Channel to get presence of, required.
   string channel = 1;
 }
 
+// PresenceResult is the result of a presence request.
 message PresenceResult {
+  // Clients present in the channel, keyed by client id.
   map<string, ClientInfo> presence = 1;
 }
 
+// PresenceStatsRequest asks for the presence stats of a channel.
 message PresenceStatsRequest {
+  // Channel to get presence stats of, required.
   string channel = 1;
 }
 
+// PresenceStatsResult is the result of a presence stats request.
 message PresenceStatsResult {
+  // Number of clients (connections) in the channel.
   uint32 num_clients = 1;
+  // Number of unique users in the channel.
   uint32 num_users = 2;
 }
 
+// StreamPosition is a position in a channel stream.
 message StreamPosition {
+  // Stream offset.
   uint64 offset = 1;
+  // Stream epoch. Changes when the stream is reset (e.g. history expired or
+  // lost), offsets of different epochs are not comparable.
   string epoch = 2;
 }
 
+// HistoryRequest asks for the publication history of a channel.
 message HistoryRequest {
+  // Channel to get history of, required.
   string channel = 1;
   reserved 2, 3, 4, 5, 6;
+  // Maximum number of publications to return. Zero returns no publications,
+  // only the current stream position. -1 returns all publications. The server
+  // may cap it with its configured limit.
   int32 limit = 7;
+  // Optional position to iterate from: publications after it are returned
+  // (before it when reverse is set). An epoch mismatch results in error
+  // 112 (unrecoverable position), a zero offset with reverse set - in error
+  // 107 (bad request).
   StreamPosition since = 8;
+  // When set publications are returned from newest to oldest.
   bool reverse = 9;
 }
 
+// HistoryResult is the result of a history request.
 message HistoryResult {
+  // Publications from the stream.
   repeated Publication publications = 1;
+  // Current stream epoch.
   string epoch = 2;
+  // Current stream top offset.
   uint64 offset = 3;
 }
 
+// PingRequest is not supported by the server at the moment: a command carrying
+// it is rejected. Connection liveness is checked with server pings (empty
+// Reply) and client pongs (empty Command), see ConnectResult.pong.
 message PingRequest {}
 
+// PingResult is reserved for a response to PingRequest.
 message PingResult {}
 
+// RPCRequest is a remote procedure call handled by the application.
 message RPCRequest{
+  // Call payload.
   bytes data = 1;
+  // Optional method name to route the call.
   string method = 2;
 }
 
+// RPCResult is the result of an RPC call.
 message RPCResult {
+  // Result payload.
   bytes data = 1 ;
 }
 
+// SendRequest is an asynchronous message from the client to the server
+// handled by the application. No Reply is sent in response, so the command
+// may have zero id.
 message SendRequest{
+  // Message payload.
   bytes data = 1;
 }
 
+// FilterNode is a node of a publication tags filter expression tree, see
+// SubscribeRequest.tf.
 message FilterNode {
   // Operation type for this node:
   // - "" (empty string) → leaf node (comparison)
-  // - "and" → logical AND of child nodes
-  // - "or"  → logical OR of child nodes
+  // - "and" → logical AND of child nodes (at least one)
+  // - "or"  → logical OR of child nodes (at least one)
   // - "not" → logical NOT of a single child node
   string op = 1;
-  // Key for comparison (only valid for leaf nodes).
+  // Tag key for comparison (only valid for leaf nodes). Required for all
+  // comparisons except "ex" and "nex".
   string key = 2;
   // Comparison operator for leaf nodes.
   // Only meaningful if op == "".
@@ -333,10 +870,16 @@ message FilterNode {
   //   "lte"  → numeric less than or equal val
   //   "gt"   → numeric greater than val
   //   "gte"  → numeric greater than or equal val
+  //
+  // A missing tag never matches eq, sw, ew, ct and numeric comparisons, and
+  // always matches neq. For in and nin a missing tag is compared as an empty
+  // string. Numeric comparisons parse both sides as decimal numbers and do not
+  // match when either side is not a number.
   string cmp = 3;
-  // Single value used in most comparisons (e.g. "eq").
+  // Single value used in most comparisons (e.g. "eq"). Required for all
+  // comparisons except "in", "nin", "ex" and "nex".
   string val = 4;
-  // Multiple values used for set comparisons ("in", "nin").
+  // Multiple values used for set comparisons ("in", "nin"), required for them.
   repeated string vals = 5;
   // Child nodes.
   // Used for logical operations: "and", "or", "not".
